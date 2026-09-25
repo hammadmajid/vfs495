@@ -9,7 +9,7 @@ static FILE *lg(void){ static FILE*f; if(!f){ const char*p=getenv("VFS_USBLOG");
   f=p?fopen(p,"w"):stderr; if(!f)f=stderr; } return f; }
 static void hex(const char*tag,int ep,const char*b,int n){
   FILE*f=lg(); fprintf(f,"%s ep=0x%02x len=%d ",tag,ep,n);
-  for(int i=0;i<n && i<256;i++) fprintf(f,"%02x",(unsigned char)b[i]);
+  for(int i=0;i<n && i<20000;i++) fprintf(f,"%02x",(unsigned char)b[i]);
   fprintf(f,"\n"); fflush(f);
 }
 typedef int (*bw_t)(void*,int,char*,int,int);
