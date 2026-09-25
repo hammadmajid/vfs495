@@ -383,3 +383,27 @@ Traced HP `getprintwait -doinit` under gdb (scsSend plaintext dump) + usblog (ep
   timing issue, not a protocol gap). Prior art's fallback for descrambled lines is a gdb RAM dump of
   UnpackLineRT — proven but uses HP's decode; our decode_image.py is a fully-open alternative pending a
   good swipe.
+
+---
+
+## 2026-09-26 — *** REAL FINGERPRINT captured; end-to-end capture path proven ***
+
+- Frame types clarified: raw ep2 interleaves MAIN image lines (width 264) and NAVIGATION lines
+  (width 200); separating them from the raw stream = irDliRTFalconData's assembly (prior art's known-
+  hard unsolved open problem). Dumped the true perm table (captures/perm_264.bin, width 264, valid
+  permutation) — first 200 are 199..0, but the raw stream also needs the correct frame demux.
+- To prove the capture works end-to-end, harvested HP's UnpackLineRT OUTPUT (already descrambled 264-wide
+  lines) via gdb (scripts/harvest_lines.gdb.py) during a firm swipe: **6572 lines, per-line std ~71**
+  (strong finger contact). Reconstructed (fixed-pattern removal + ridge bandpass + finger-segment +
+  novelty motion-resample + local-contrast normalize): **captures/fingerprint_open.png = a clean,
+  recognizable fingerprint (loop core, coherent ridge flow).** (Biometric images gitignored.)
+
+### END-TO-END STATUS
+- Open PAIRING/OWNERSHIP: fully reverse-engineered + verdict (cmd 0x0f DH s_key + cmd 0x2c host RSA
+  keypair; reversible; 65535 cycles). NOT needed for our sensor (unowned).
+- Open SECURE SESSION: **DONE, proven live** with zero HP code (scripts/vfs495_open.py --handshake).
+  This is the wall every prior VFS495 project hit (alert 0x2f) — now crossed.
+- CAPTURE: command 0x02 identified; a real fingerprint captured end-to-end. The image descramble/assembly
+  (irDliRTFalconData/UnpackLineRT) is currently done by HP's code (RAM-harvested); porting THAT to open
+  code (using the dumped perm + frame demux) is the one remaining step to a 100%-open capture. The SSLv3
+  session — the actual security gate and prior blocker — is already fully open.
