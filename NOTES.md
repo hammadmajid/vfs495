@@ -192,3 +192,40 @@ E. Only if a secret/step is found: build a standalone pyusb pairing+session, val
 ### Tools installed this session (for the user's record)
 - `sudo dnf install strace rizin` (+deps: rizin-common, libtree-sitter0.25).
 - Python venv at .venv with `pyusb` (1.3.1).
+
+---
+
+## 2026-09-25 — SOLVED: why prior art hit alert 0x2f (the ownership proof in the handshake)
+
+Read `scsSSLClientKeyExchangeWrite` @0x513f30. The ClientKeyExchange is NOT a standard
+RSA-wrapped premaster. The exact construction:
+1. premaster = `03 00` + 46 random bytes (48B)   [scsSSLGetRandom(0x2e), palCryptoRng]
+2. **premaster is AES-256-CBC-encrypted with `s_key`** (the 32-byte shared secret, id-1, ctx+0x148)
+   via `scsSSLAesEncDec` @0x516340 (edx=0x30=48B; key=ctx+0x148; palCryptoAesCbc; 16B IV handling).
+3. CKE plaintext = that 48B blob; PKCS#1 v1.5 padded to 256B; RSA-encrypted with the sensor pubkey
+   (`scsSSLRsaPublicEncrypt`, premaster at EM offset 208 — matches prior art's byte layout).
+
+Sensor side: RSA-decrypt -> AES-decrypt with ITS stored `s_key` -> premaster -> derive master.
+A host lacking the correct `s_key` produces a garbage premaster -> master mismatch -> client Finished
+never verifies -> **fatal alert 0x2f**. This matches EVERY prior-art observation exactly:
+- "corrupting CKE ciphertext -> same 0x2f" (any wrong premaster' fails identically),
+- "premaster version bytes all -> same 0x2f",
+- their KDF/Finished "byte-exact" (they fed HP's already-AES-decrypted premaster; the KDF fn IS standard),
+- wire "byte-structurally identical" (the AES layer is invisible inside the 256B RSA blob).
+
+=> **THE missing piece in prior art's open SSL client is a single step: AES-256-CBC(premaster, s_key)
+   before the RSA in ClientKeyExchange.** Everything else in tools/ssl_session.py is correct.
+
+Also present but gated OFF in this RSA-KX flow (only used if the sensor sends a CertificateRequest):
+- `scsSSLCertificateWrite` @0x5134a0 — client Certificate carrying id-12 host pubkey (ctx+0x124).
+- `scsSSLCertificateVerifyWrite` @0x513890 — signs the handshake hash with id-13 host priv key
+  (scsSSLRsaPrivateEncrypt, ctx+0x530). Consistent with prior art's 340B flight = CKE+CCS+Finished only.
+
+### What this means end-to-end
+- The one secret that unlocks the session is **`s_key`** (32B). It is DH-derived and shared between host
+  and sensor at pairing (TakeOwnership), then persisted on both sides. Not in the binary, not from serial.
+- An open session = prior-art SSLv3 client + the AES(s_key) CKE wrap. An open login path additionally
+  needs an open pairing to establish a matching `s_key` on both sides.
+- Pairing is UNAVOIDABLE for capture: an unowned sensor has no `s_key` (session can't work at all); an
+  owner from a different host (e.g. Windows) holds a `s_key` we cannot read. So we must run our own
+  TakeOwnership to get a matching pair. That is a persistent, cycle-limited sensor write => needs user OK.
