@@ -339,3 +339,25 @@ confirmed: their sensor was owned (needed s_key); ours is unowned (standard SSLv
   from ep2, then decode/descramble/assemble (prior art's UnpackLineRT/reconstruct is the spec).
 - Needs a finger swipe (~2s after prompt). Will trace HP's getprintwait once to pin the exact in-session
   command + ep2 framing, then reproduce it open. (Requires user at the sensor.)
+
+---
+
+## 2026-09-26 — Capture command identified + real swipe image captured (traced)
+
+Traced HP `getprintwait -doinit` under gdb (scsSend plaintext dump) + usblog (ep2), one user swipe.
+- **Capture command = cmd 0x02** (scsSensorSendGetFingerprint_V4), sent as SSL AppData, with a large
+  (~2.3–3.0 KB) config blob. Image returns PLAINTEXT on ep2.
+- Post-handshake capture sequence (plaintext, from captures/plaintext_cmds.txt):
+  `1f 1a 06(getprint-patch 405B) 02(config ~2331B)` then repeated `02` frame reads; calibration uses
+  `06(2581B)`; `12`, `17`, `04(Abort)` also appear. getprintwait re-arms via `1a`(unload)+`06`(reload).
+- Real swipe captured: **4.10 MB ep2, 297 reads (263 varied), 546 `01 fe` frame markers** (captures/
+  capture_swipe.usblog, gitignored). Confirms the finger scan came through.
+
+### Status vs. goals
+- Open PAIRING analysis: COMPLETE (TakeOwnership = cmd 0x0f DH s_key + cmd 0x2c host RSA keypair;
+  reversible, 65535 cycles). Not needed for THIS sensor (unowned).
+- Open SECURE SESSION: **DONE and proven live** (scripts/vfs495_open.py --handshake). This is the wall
+  every prior VFS495 project hit; crossed with zero HP code in the session.
+- Open CAPTURE: capture command + framing known; image data captured. Remaining: reproduce the
+  post-handshake capture sequence as AppData in the open client + decode (prior art's descramble/assembly
+  is the decode spec).
