@@ -544,3 +544,33 @@ Swipe technique that works: one finger, slow (~1.5-2s), firm continuous top->bot
 mid-swipe. ~270-300 finger lines per good swipe. Fully-open CAPTURE (Rust arming cmd 0x02 itself,
 no HP at all) is the next milestone: ~40 in-session commands (02 + per-capture 06 patch uploads +
 1a/12/04/17) traced in order in captures/plaintext_cmds.txt (gitignored) — a deliberate replay to build.
+
+---
+
+## 2026-09-26 — Fully-open capture: handshake+resets work, imaging NOT yet triggered (WIP)
+
+Built the fully-open capture (Rust arms the sensor, no HP): handshake -> replay the 42 in-session
+commands (captures/capture_seq.json, extracted from HP trace) as AppData records (17 03 00...), read EP2.
+
+Wire format nailed: post-handshake, every command is a plain SSLv3 AppData record `17 03 00 <len> <ct>`
+sent DIRECTLY on EP1 (no 0x11 tunnel; tunnel is handshake-only). EP2 image is plaintext. Confirmed by
+matching plaintext lengths to encrypted wire lengths in init_full.usblog.
+
+Capture is a MULTI-PHASE STATE MACHINE with soft resets: cmd 0x04 (trace idx 35 & 39) soft-resets the
+sensor -> it re-enumerates on USB (dmesg: disconnect + new full-speed device, same 138a:003f). Added
+Sensor::reopen() (re-acquire handle over ~3s) and reset-aware arm_capture that keeps the Record across
+the reset. Runs now complete all 42 commands and survive both resets.
+
+BUT no image: EP2 yields only 16384 bytes of 0xFF (empty/uninitialized) — imaging never triggers.
+Likely cause: the SSL session does NOT survive the 0x04 reset the way assumed (needs a re-handshake
+after each reset), so post-reset AppData commands are rejected and the sensor never arms; and/or the
+finger-wait/imaging trigger + swipe timing isn't reproduced. An early cmd-2 disconnect also seen
+(device still settling from prior run's reset).
+
+DECISIVE NEXT EXPERIMENT (one instrumented swipe): capture HP getprintwait's RAW EP1 writes with
+usblog.so preloaded, across the 0x04 resets, to see if HP re-handshakes (sends 0x11 tunnels) after each
+reset and what triggers imaging. init_full.usblog only covers a simpler single-session flow (no 04/no
+re-handshake), so it can't answer this. Then match HP's post-reset behavior.
+
+State: fully-open SESSION + DECODE are proven; fully-open CAPTURE needs this deeper reset/imaging RE
+(iterative, several swipes). Device confirmed healthy after all attempts.

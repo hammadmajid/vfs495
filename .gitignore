@@ -41,3 +41,4 @@ captures/capture_cmd.json
 
 # Raw capture/pixel dumps (biometric + device data) — never commit
 captures/*.bin
+captures/capture_seq.json

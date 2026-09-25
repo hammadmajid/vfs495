@@ -90,6 +90,33 @@ impl Sensor {
         self.write(data, 3000)?;
         self.read(0x400, 3000)
     }
+
+    /// Re-acquire the device after it re-enumerates (the capture flow issues
+    /// `0x04` soft resets). The firmware keeps the SSL session across the reset,
+    /// so callers keep their existing `Record`; only the USB handle changes.
+    /// Retries for up to ~3s while the device comes back on the bus.
+    pub fn reopen(&mut self) -> Result<()> {
+        // drop the stale handle first
+        let _ = self.handle.release_interface(0);
+        for _ in 0..30 {
+            std::thread::sleep(Duration::from_millis(100));
+            if let Some(dev) = find_device() {
+                if let Ok(handle) = dev.open() {
+                    self.reattach = false;
+                    if handle.kernel_driver_active(0).unwrap_or(false) {
+                        let _ = handle.detach_kernel_driver(0);
+                        self.reattach = true;
+                    }
+                    handle.set_active_configuration(1).ok();
+                    if handle.claim_interface(0).is_ok() {
+                        self.handle = handle;
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        anyhow::bail!("device did not re-enumerate within timeout after reset")
+    }
 }
 
 impl Drop for Sensor {
