@@ -23,3 +23,9 @@ captures/*.patch
 captures/init_cmds.json
 vendor/patches/
 captures/skey_dump.json
+
+# Biometric fingerprint images / raw scanline dumps — never commit (privacy)
+captures/*.png
+captures/*.pgm
+captures/lines.raw
+captures/perm_*.bin
