@@ -173,14 +173,14 @@ impl Record {
 
         let mut inner = Vec::new();
         inner.extend_from_slice(key);
-        inner.extend_from_slice(&vec![0x36u8; 40]);
+        inner.extend_from_slice(&[0x36u8; 40]);
         inner.extend_from_slice(&hdr);
         inner.extend_from_slice(data);
         let ih = sha1(&inner);
 
         let mut outer = Vec::new();
         outer.extend_from_slice(key);
-        outer.extend_from_slice(&vec![0x5cu8; 40]);
+        outer.extend_from_slice(&[0x5cu8; 40]);
         outer.extend_from_slice(&ih);
         sha1(&outer)
     }
@@ -248,7 +248,6 @@ pub fn random_bytes(n: usize) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     // The "client finished" label is struct.pack("<I", 0x434C4E54).
     pub const FINISHED_LABEL: [u8; 4] = [0x54, 0x4e, 0x4c, 0x43];

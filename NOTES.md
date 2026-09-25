@@ -465,3 +465,34 @@ sha1, md-5, num-bigint, num-traits, rand, serde/serde_json, anyhow, clap, hex, l
 Remaining open work (documented in README Limitations): width-264 main-frame assembly
 (irDliRTFalconData/UnpackLineRT) in open code; parse RSA modulus from the sensor certificate for
 device portability; pairing/TakeOwnership for owned sensors (persistent write, needs explicit OK).
+
+---
+
+## 2026-09-26 — Open image assembly: UnpackLineRT ported + verified on real data
+
+Closed the "image assembly done via gdb RAM harvest" gap. Disassembled HP's UnpackLineRT (0x46f510)
+and reimplemented it clean-room in `src/image.rs`. Three modes:
+- mode 8  (cfg[0]==8): dst[perm[i]] = src[i]  (8-bit direct + descramble scatter).
+- mode 4  (cfg[0]==4): each byte -> two pixels: (b&0x0f)<<4 at perm[i], (b&0xf0) at perm[i+1].
+- general (else): per-column bit widths at cfg+8 (clamped to max_bits = src[6]&0xf), samples read
+  little-endian from the packed stream, left-justified `<< (8-w)`, scattered via perm at cfg+0x57c.
+Descramble table = captures/perm_264.bin (u16 perm of 0..263 = reverse(0..199) ++ reverse(200..263)).
+Unit tests cover mode8/mode4/general + general==mode8 when 8-bit. All pass (5 tests).
+
+Assembly + reconstruction (`load_lines_raw`, `finger_segment`, `normalize`, `reconstruct`) verified
+OFFLINE on the real harvested lines.raw (6572x264): `vfs495 decode-lines` -> 264x6572 PGM, std ~54,
+and an FFT ridge check shows a clear ridge band (period ~14 px, peak/mean 3.2x). So the open
+descrambled-lines -> fingerprint path is proven on real data with zero HP code at decode time.
+
+Raw-EP2 unpack: `decode_ep2` + `DliConfig` implement it, but need the per-column bit table for our
+capture (frames are ~200 packed bytes -> 264 samples => variable <8-bit). Added
+`scripts/dump_dli_config.gdb.py` to dump {mode,width,max_bits,bits,perm} in one gdb run on the next
+swipe -> captures/dli_config.json (gitignored; decoder auto-loads it). That removes the last HP
+dependency at capture time; only verification of the live raw path is pending a swipe.
+
+Modulus-from-certificate: investigated. The sensor ships its RSA pubkey inside an opaque signed key
+blob on ep2 during init (found at a device-specific offset; no clean TLV/length anchor, exponent not
+adjacent). No verifiable generic parser without full cert-format RE, so kept modulus-from-file
+(reliable) + documented dump path for other devices. Not shipping an unverifiable wire parser.
+
+New CLI: `decode-lines` (open lines->PGM), `decode` now does full unpack+descramble+reconstruct.
