@@ -90,11 +90,11 @@ fn main() -> Result<()> {
             println!("[+] handshake OK — secure session established");
         }
         Command::Capture { out } => {
-            let dev = usb::Sensor::open()?;
+            let mut dev = usb::Sensor::open()?;
             let mut rec = session::handshake(&dev, &cfg)?;
-            capture::arm_capture(&dev, &mut rec, &cli.base)?;
+            let mut stream = capture::arm_capture(&mut dev, &mut rec, &cli.base)?;
             eprintln!(">> swipe your finger now");
-            let stream = capture::read_ep2_stream(&dev, 800, 8000);
+            stream.extend(capture::read_ep2_stream(&dev, 1200, 15000));
             std::fs::write(&out, &stream)?;
             println!("[+] wrote {} ({} bytes)", out.display(), stream.len());
         }
@@ -129,11 +129,11 @@ fn main() -> Result<()> {
         }
         Command::Run { socket } => {
             let sock = resolve_socket(socket)?;
-            let dev = usb::Sensor::open()?;
+            let mut dev = usb::Sensor::open()?;
             let mut rec = session::handshake(&dev, &cfg)?;
-            capture::arm_capture(&dev, &mut rec, &cli.base)?;
+            let mut stream = capture::arm_capture(&mut dev, &mut rec, &cli.base)?;
             eprintln!(">> swipe your finger now");
-            let stream = capture::read_ep2_stream(&dev, 800, 8000);
+            stream.extend(capture::read_ep2_stream(&dev, 1200, 15000));
             let cfg = image::DliConfig::load_main(&cli.base)?;
             let lines = image::decode_ep2(&stream, 272, &cfg);
             if lines.rows < 20 {
