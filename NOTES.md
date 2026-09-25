@@ -574,3 +574,37 @@ re-handshake), so it can't answer this. Then match HP's post-reset behavior.
 
 State: fully-open SESSION + DECODE are proven; fully-open CAPTURE needs this deeper reset/imaging RE
 (iterative, several swipes). Device confirmed healthy after all attempts.
+
+---
+
+## 2026-09-26 — Fully-open capture is BLOCKED: capture is an interactive protocol, not a replay
+
+Self-trace wire-diff (added VFS_WIRE logging in src/usb.rs; compared my EP1/EP2 traffic to HP's
+getprint_trace.usblog). Findings:
+
+- Post-handshake wire format is correct: my setup commands are ACCEPTED (device streams real baseline
+  image on EP2 — hundreds of non-0xFF 16384-byte reads). Handshake + config replay work.
+- The stall is at the poll loop. HP's poll commands (02/2691 enc 2725, 02/3033 enc 3061) return a
+  **2437-byte** response on EP1 IN. My byte-identical commands return only **37 bytes** (short reject).
+- HP's live command sequence also DIFFERS from my recorded one (e.g. HP sends two 02/2666 where the
+  recorded trace has one). => the sequence is DYNAMIC.
+
+Conclusion: capture is an **interactive, adaptive protocol** — HP reads the large (2437-byte) poll
+responses (calibration/frame state) and BUILDS subsequent commands from them. A static replay sends
+stale, session-mismatched parameters, so the sensor short-rejects each poll command and then NAKs all
+further EP_OUT writes (the "Operation timed out" at the first 0x04). Finger presence is irrelevant —
+rejection happens before imaging. Root cause is NOT a USB/flow bug; it's protocol semantics.
+
+What fully-open capture now requires (substantial, separate effort): reverse the capture state machine
+in HP's binary — decode the 2437-byte poll responses, and reimplement how the poll commands
+(02/2691, 02/3033, their embedded parameters) are constructed from session/calibration state. This is
+real decompilation of HP's imaging logic, not a replay.
+
+Infra added this session (committed): src/usb.rs VFS_WIRE wire logger + Sensor::reopen(); capture.rs
+replays in-session AppData with retries + heavy EP2 drain (proven correct for setup; insufficient for
+the adaptive poll loop). Device confirmed healthy after all attempts (re-enumerates cleanly).
+
+STATE: open SESSION + open DECODE remain proven end-to-end. Fully-open CAPTURE is blocked on the
+interactive-protocol RE above. For a usable driver sooner, the alternative is to drive HP's capture
+(getprintwait) and decode its output with our open code — but that keeps a proprietary component in the
+capture path, which is out of scope for a fully-open login path.

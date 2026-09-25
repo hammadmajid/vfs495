@@ -32,43 +32,53 @@ fn load_sequence(base: &Path) -> Result<Vec<Vec<u8>>> {
         .collect()
 }
 
-/// The `0x04` command soft-resets the sensor (it re-enumerates on USB).
-const RESET_CMD: u8 = 0x04;
+/// Drain all currently-available image bytes from EP2 into `img`.
+fn drain_image_into(dev: &Sensor, img: &mut Vec<u8>, quiet_reads: usize) {
+    let mut empties = 0;
+    for _ in 0..256 {
+        let chunk = dev.read_image(16384, 60);
+        if chunk.is_empty() {
+            empties += 1;
+            if empties >= quiet_reads {
+                break;
+            }
+        } else {
+            empties = 0;
+            img.extend_from_slice(&chunk);
+        }
+    }
+}
 
-/// Arm capture by replaying the in-session command sequence as AppData records,
-/// handling the `0x04` soft resets (re-acquire the USB handle, keep the SSL
-/// session), and draining image bytes that arrive between commands. Returns the
-/// image bytes seen during arming. `dev` may point at a new USB handle on return.
+/// Replay the in-session capture command sequence as AppData records (all
+/// in-session commands are `0x17` records on EP1 regardless of their inner
+/// command byte). The `0x04` poll command latches a frame and can be slow to
+/// answer, so we wait on its reply rather than racing the next write (which the
+/// busy device would NAK). Drains the plaintext image from EP2 throughout.
+/// A finger must be swiping during the poll loop for real frames to appear.
 pub fn arm_capture(dev: &mut Sensor, rec: &mut Record, base: &Path) -> Result<Vec<u8>> {
     let seq = load_sequence(base)?;
     let mut img = Vec::new();
-    for (i, plain) in seq.iter().enumerate() {
+    for plain in seq.iter() {
         let record = rec.encrypt(APPDATA, plain);
         // AppData records go directly on EP1 (no 0x11 tunnel) once the session is up.
-        match dev.write(&record, 3000) {
-            Ok(_) => {
-                let _ = dev.read(0x1000, 800); // discard encrypted reply
-                let chunk = dev.read_image(16384, 50);
-                if !chunk.is_empty() {
-                    img.extend_from_slice(&chunk);
-                }
+        // Retry the write a few times without reopening — a NAK just means the
+        // device is still finishing the previous (poll) command.
+        let mut wrote = false;
+        for _ in 0..3 {
+            if dev.write(&record, 4000).is_ok() {
+                wrote = true;
+                break;
             }
-            Err(e) => {
-                // a stale handle after an earlier reset shows up as "No such device"
-                log::warn!("cmd {i} (0x{:02x}) write failed ({e}); re-acquiring device", plain[0]);
-                dev.reopen()?;
-                let _ = dev.write(&record, 3000); // retry once on the fresh handle
-                let _ = dev.read(0x1000, 800);
-            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        // after a soft-reset command, the device re-enumerates: swap the handle,
-        // keep the Record (firmware preserves the session across the reset).
-        if plain[0] == RESET_CMD {
-            log::info!("cmd {i}: 0x04 reset — re-acquiring device");
-            dev.reopen()?;
+        if !wrote {
+            log::warn!("cmd 0x{:02x} did not write after retries; continuing", plain[0]);
         }
+        // Wait for the reply — poll/latch commands answer slowly.
+        let _ = dev.read(0x1000, 4000);
+        drain_image_into(dev, &mut img, 2);
     }
-    log::info!("capture armed ({} commands, {} early image bytes)", seq.len(), img.len());
+    log::info!("capture replayed ({} commands, {} image bytes)", seq.len(), img.len());
     Ok(img)
 }
 

@@ -10,7 +10,26 @@
 
 use anyhow::{anyhow, Context, Result};
 use rusb::{Device, DeviceHandle, GlobalContext};
+use std::io::Write;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
+
+/// Optional wire log (set `$VFS_WIRE` to a path) for diffing against HP traces.
+fn wire_log(tag: &str, ep: u8, data: &[u8]) {
+    static LOG: OnceLock<Option<Mutex<std::fs::File>>> = OnceLock::new();
+    let slot = LOG.get_or_init(|| {
+        std::env::var("VFS_WIRE")
+            .ok()
+            .and_then(|p| std::fs::File::create(p).ok())
+            .map(Mutex::new)
+    });
+    if let Some(m) = slot {
+        if let Ok(mut f) = m.lock() {
+            let head: String = data.iter().take(16).map(|b| format!("{b:02x}")).collect();
+            let _ = writeln!(f, "{tag} ep=0x{:02x} len={} {head}", ep, data.len());
+        }
+    }
+}
 
 pub const VID: u16 = 0x138a;
 pub const PID: u16 = 0x003f;
@@ -44,6 +63,7 @@ impl Sensor {
 
     /// Write a command to EP1 OUT.
     pub fn write(&self, data: &[u8], timeout_ms: u64) -> Result<usize> {
+        wire_log("W", EP_OUT, data);
         self.handle
             .write_bulk(EP_OUT, data, Duration::from_millis(timeout_ms))
             .map_err(|e| anyhow!("EP_OUT write failed: {e}"))
@@ -57,6 +77,7 @@ impl Sensor {
             .read_bulk(EP_IN, &mut buf, Duration::from_millis(timeout_ms))
             .map_err(|e| anyhow!("EP_IN read failed: {e}"))?;
         buf.truncate(n);
+        wire_log("R", EP_IN, &buf);
         Ok(buf)
     }
 
@@ -69,6 +90,7 @@ impl Sensor {
         {
             Ok(n) => {
                 buf.truncate(n);
+                wire_log("R", EP_IMG, &buf);
                 buf
             }
             Err(_) => Vec::new(),
