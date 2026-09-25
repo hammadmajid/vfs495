@@ -272,3 +272,41 @@ Flow (open-reimplementable):
   read). This matters: developing/testing an OPEN pairing could burn several cycles, whereas HP's binary
   pairs correctly in one. Pairing is one-time SETUP, not the login path, so using HP's binary for the
   single pairing write would still leave a 100%-HP-free login path.
+
+---
+
+## 2026-09-26 — BREAKTHROUGH: our sensor is UNOWNED → open session needs NO pairing
+
+Built a live-trace harness (scripts/build_harness.sh -> vendor/runtime/, gitignored): HP binary +
+5-byte HOST-side unlock patch + OpenSSL-0.9.8 stub libs + distro libusb-0.1 + our LD_PRELOAD USB logger
+(scripts/usblog.c). Ran HP's `get_ownership_info -doinit` (authorized RAM-patch read).
+
+### Ownership state (captures/getownership.usblog)
+- `get_ownership_info -doinit` => **SUCCESS. Total cycles 65535, Available 65535.**
+  available==total==0xffff => **the sensor is UNOWNED (factory); no ownership ever taken**, and cycles are
+  effectively unlimited. (Old Windows Hello evidently never took ownership via this counter, or was reset.)
+- The command ran INSIDE a full SSL session that **completed successfully** with NO
+  /etc/ValidityPersistentData present: init `01 19 06(patch693) 01 1f 1f(cfg) 06(patch1301) 01` then
+  `11` ClientHello -> ServerHello("FALCSSL",0044) -> `11 54 01` CKE+CCS+Finished flight -> server
+  `14 03 00`CCS + `16 03 00 00 40`Finished. Session up; app-data (`17 03 00`) + ep2 image (0xff empty).
+
+### Why prior art hit 0x2f and we do not (gdb dump: captures/skey_dump.json)
+- Dumped the live handshake secrets. **`cke_input_after_aeswrap` == raw `premaster` byte-for-byte** =>
+  on an UNOWNED sensor the AES-256-CBC(premaster, s_key) step is SKIPPED (s_key pointer is NULL because
+  id-1 isn't in storage). So our CKE = **plain RSA(premaster) — standard SSLv3.**
+- => The prior author's byte-exact open SSLv3 client would have WORKED on an unowned sensor. Their
+  alert 0x2f happened only because THEIR sensor was OWNED (required the real s_key AES-wrap). This fully
+  reconciles their "crypto byte-exact yet rejected" paradox.
+- Master secret = standard SSLv3 KDF(premaster, cR, sR); confirmed live (captures/skey_dump.json).
+
+### Our sensor's RSA public key (captures/modulus.json — per-device, from live handshake)
+- 2048-bit, exp 65537, modulus (big-endian as HP lays it out at keyptr+8):
+  `bd5c2253ed964b9b417b690c35d4a8de…04abea`. (Prior art's sensor started bd2f0c74; ours bd5c2253.)
+
+### Revised verdict & plan (no sensor write needed!)
+- **Open, HP-free CAPTURE on THIS sensor is achievable with NO pairing:** replay the static init
+  (patch uploads — HP firmware blobs to RAM, the accepted community compromise; extractable/replayable)
+  + an OPEN standard SSLv3-RSA handshake (our modulus) + capture cmd in-session + plaintext ep2 image.
+- Pairing/TakeOwnership + the s_key AES-wrap remain fully documented for the general (owned-sensor) case,
+  but are NOT required here. No ownership write will be attempted (sensor left unowned/factory).
+- NEXT: build scripts/vfs495_open.py (pyusb): (1) replay init, (2) open SSLv3 session, (3) capture.
