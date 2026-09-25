@@ -1,0 +1,41 @@
+[package]
+name = "vfs495"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+description = "Open-source userspace driver for the Validity VFS495 (USB 138a:003f) swipe fingerprint sensor"
+authors = ["Hammad Majid"]
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/hammadmajid/vfs495"
+keywords = ["fingerprint", "validity", "vfs495", "libfprint", "biometric"]
+categories = ["hardware-support"]
+
+[[bin]]
+name = "vfs495"
+path = "src/main.rs"
+
+[lib]
+name = "vfs495"
+path = "src/lib.rs"
+
+[dependencies]
+rusb = "0.9"
+hex = "0.4"
+aes = "0.8"
+cbc = { version = "0.1", features = ["block-padding", "alloc"] }
+sha1 = "0.10"
+md-5 = "0.10"
+num-bigint = "0.4"
+num-traits = "0.2"
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+log = "0.4"
+env_logger = "0.11"
+
+[profile.release]
+opt-level = 3
+lto = "thin"

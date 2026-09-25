@@ -1,0 +1,5 @@
+# Validity VFS495 fingerprint sensor (USB 138a:003f)
+# Lets a normal user open the device without sudo.
+# Install:  sudo cp packaging/70-vfs495.rules /etc/udev/rules.d/
+#           sudo udevadm control --reload && sudo udevadm trigger
+SUBSYSTEM=="usb", ATTRS{idVendor}=="138a", ATTRS{idProduct}=="003f", MODE="0660", TAG+="uaccess"
