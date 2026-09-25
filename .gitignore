@@ -1,0 +1,18 @@
+# HP proprietary package and anything extracted from it — NEVER commit
+vendor/
+
+# Python virtualenv
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Large raw captures (commit small/representative ones deliberately with -f)
+captures/*.pcap
+captures/*.pcapng
+captures/*.usbmon
+captures/*.bin.raw
+
+# Editor/OS cruft
+*.swp
+.DS_Store
