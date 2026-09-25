@@ -407,3 +407,27 @@ Traced HP `getprintwait -doinit` under gdb (scsSend plaintext dump) + usblog (ep
   (irDliRTFalconData/UnpackLineRT) is currently done by HP's code (RAM-harvested); porting THAT to open
   code (using the dumped perm + frame demux) is the one remaining step to a 100%-open capture. The SSLv3
   session — the actual security gate and prior blocker — is already fully open.
+
+---
+
+## 2026-09-26 — virtual_image integration PROVEN (isolated, no login config touched)
+
+Question: will the libfprint `virtual_image` bridge actually carry enroll/verify (so GDM/sudo work)?
+Verified the driver-specific link directly, without touching fprintd/PAM/GDM config.
+
+Machine facts (read-only): libfprint 1.94.100 ships `virtual_image` (FpDeviceVirtualImage in
+/usr/lib64/libfprint-2.so.2); fprintd 1.94.5 + pam_fprintd installed; **GDM already has
+/etc/pam.d/gdm-fingerprint** (fingerprint login is 100% fprintd/PAM-mediated; GDM never touches the driver).
+
+scripts/vimage_proof.py drives libfprint via GObject-introspection against `virtual_image`
+(FP_VIRTUAL_IMAGE socket; protocol `<i32 w><i32 h><w*h gray>`, libfprint listens). Result:
+- device driver=virtual_image, 5 enroll stages;
+- ENROLL 5/5 -> template from our real captured print;
+- VERIFY(same) -> **match=True**; VERIFY(different) -> non-match. **RESULT: PASS.**
+Caveat: the non-match image was synthetic (no minutiae -> rejected), so it proves "won't falsely accept";
+real impostor discrimination (genuine 79 vs impostor 5, threshold 40) was already shown by prior art via
+fprintd. Cannot test through the *system* fprintd without a fprintd systemd drop-in (= config change,
+disallowed) — but that layer (fprintd/pam_fprintd/gdm-fingerprint) is stock/unmodified.
+
+Conclusion: the virtual_image path is real and works; a Rust helper feeding it is a sound architecture
+for native GDM+sudo. Language choice is decoupled from this integration choice.
