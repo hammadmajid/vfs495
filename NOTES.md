@@ -229,3 +229,46 @@ Also present but gated OFF in this RSA-KX flow (only used if the sensor sends a 
 - Pairing is UNAVOIDABLE for capture: an unowned sensor has no `s_key` (session can't work at all); an
   owner from a different host (e.g. Windows) holds a `s_key` we cannot read. So we must run our own
   TakeOwnership to get a matching pair. That is a persistent, cycle-limited sensor write => needs user OK.
+
+---
+
+## 2026-09-25 — Pairing protocol mapped; sensor-state probe; Windows now gone
+
+### User update
+- Windows no longer on this machine (Fedora-only now); Windows Hello fingerprint WAS used in the past.
+  => the sensor is most likely still OWNED by that old Windows install (owner record persists in sensor
+  secure storage), but re-pairing has NO functional downside now (no Windows to break). Only cost = one
+  ownership cycle. User directive stands: pause before any write.
+
+### Read-only state probe (scripts/probe_state.py — all reads HP sends, no writes/patches)
+- GetVersion(0x01): OK, v4.60.0104, serial 00a0ee0e4080, security 017d.
+- GetStartInfo(0x19): 68B status 0; carries a 40-byte high-entropy sensor blob (a boot/session nonce).
+- GetOwnershipInfo(0x26): still status 0x0401 after 0x01+0x19 => reading current owner + remaining
+  ownership-cycle count needs the security-management patch loaded to sensor RAM first (non-persistent,
+  unloadable). Held off per "pause before write".
+
+### Pairing routine fully mapped (vcsWITSetOwnership @0x447410)
+Flow (open-reimplementable): 
+1. `palCryptoRsaGenerateKeypair` -> `palCryptoRsaExportPublicKey` / `…ExportPrivateKeyBlobData`
+   = host generates its OWN owner RSA-2048 keypair.
+2. `scsSensorTakeOwnershipWithKeys` -> cmd **0x2c** (845B payload = 32 + 32 + 256 + 256 + 256):
+   registers the host public key (+ secrets) with the sensor.
+3. `scsSensorTakeOwnership` -> cmd **0x0f** (66B) + 0x13 + 0x17: DH exchange establishing the 32-byte
+   shared secret `s_key` (scsDHEstablishSessionKey @0x516700 uses palCryptoRng + loads a patch;
+   sensor side computes its half).
+4. `scsStoreDataInStorage` + `palSetPersistentDataBinaryValue` + `scsSerializeRawPartition`:
+   persist HAPrivKey(id13)+s_key(id1)+host pub(id12)+sensor pub(id10)+cert(id11) to
+   /etc/ValidityPersistentData (GSKGlobal-wrapped).
+5. `GetOwnershipInfo` to verify.
+- Related opcodes: ResetOwnership = cmd **0x10** (98B) + 0x0b(34B) + 0x05(Reset). LoadSecurityManagement
+  patch is required in RAM for the ownership commands.
+
+### Where this leaves feasibility
+- Open LOGIN path (session+capture): SOLVED on paper — prior-art SSLv3 client + AES-256-CBC(premaster,
+  s_key) in CKE + plaintext ep2 image. Needs a known s_key (from pairing).
+- Open PAIRING: fully mapped in shape; exact byte-level DH (cmd 0x0f) and the 0x2c payload encryption
+  still need byte-exact pinning, best done by tracing HP's own setowner run (which is itself the write).
+- Ownership cycles are LIMITED and their remaining count is currently unknown (needs the RAM patch to
+  read). This matters: developing/testing an OPEN pairing could burn several cycles, whereas HP's binary
+  pairs correctly in one. Pairing is one-time SETUP, not the login path, so using HP's binary for the
+  single pairing write would still leave a 100%-HP-free login path.
