@@ -117,3 +117,78 @@ C. Analyze the ownership/pairing functions (0x26/0x27/0x29, setowner, scsSensorV
 D. Decide: is the pairing secret recoverable/derivable (→ open impl possible) or sensor-locked?
 E. Only if a secret/step is found: build a standalone pyusb pairing+session, validate byte-for-byte
    vs a fresh gdb/usbmon trace of HP's binary.
+
+---
+
+## 2026-09-25 — HP package analyzed: pairing IS "TakeOwnership" (major findings)
+
+### Package (in vendor/, gitignored)
+- `sp84530.tar` md5 9877c69c… (matches prior art). RPM payload extracted to vendor/rpm/.
+- Target binary: `usr/sbin/validity-sensor` — **NOT stripped, has DWARF debug_info**, 4148 symbols.
+  Image base 0x400000. `vcsFPService` is the stripped daemon (same codebase).
+
+### Sensor state on THIS laptop (read-only, cmd 0x01 GetVersion — scripts/getver.py)
+- Reply 38B: v4.60 build 104, target ROM, product 3 (Falconusb), **serial 00a0ee0e4080**
+  (matches the user-provided serial), **security[2] = 01 7d**, no patch loaded (patchsig 0).
+- IDENTICAL to prior author's sensor (they recorded v4.60.0104, security 01 7d). security 017d is the
+  default ROM security config, NOT an ownership flag.
+- `/etc/ValidityPersistentData` does **NOT exist** here; no Validity service installed; HP binaries only
+  in vendor/. => no host-side owner credential present on this machine.
+
+### The storage model (scsGetDataFromStorage @0x511c30 and scsSSLEstablishSession)
+- Session establishment (`scsSSLEstablishSession` @0x515870) reads 5 storage slots by data-ID:
+  - **id 10**: sensor RSA public key (256B modulus, exp 65537) -> ctx+0x11c  [used to encrypt premaster]
+  - **id 11**: certificate (256B) -> `scsSensorValidateCertificate` validates the id-10 modulus
+  - **id 1** : a 32-byte secret ("s_key") -> ctx+0x148 (memset+freed after handshake use)
+  - **id 12**: a SECOND RSA public key (256B, exp 65537) -> ctx+0x124  [HOST owner public key]
+  - **id 13**: an RSA **PRIVATE** key (1184B) -> `palCryptoRsaCreatePrivateKeyHandle` -> ctx+0x530
+               [HOST owner private key; consumed by scsSSLRsaPrivateEncrypt @0x516290]
+- Storage backend = **host file `/etc/ValidityPersistentData`** (palReadAll/WriteAllPersistentData,
+  palGet/SetPersistentDataBinaryValue). Keyed by the 6-byte sensor serial under a registry-style path
+  `SOFTWARE\Validity\vfs301`, value names **`HAPrivKey`** (Host App priv key = id 13), `s_key`,
+  `SPrivMod`, plus an `AfterTakeOwner` marker.
+- Each slot is wrapped by a "Secure Storage Protector": `scsEncrypt/DecryptWithGSKGlobal` (real, 32-byte
+  key via palCryptoDecrypt+checksum), `…WithGSKMCFACT` (stub), or `…Void` (plaintext). The meaningful one
+  is **GSKGlobal** — "Global" => a key that is not per-device (recoverable from the binary if ever needed;
+  irrelevant to an open impl, which stores its own keys).
+
+### Pairing = TakeOwnership (the step prior art never implemented)
+- `scsSensorTakeOwnership`/`…WithKeys` are called ONLY from the explicit **setowner** command handlers
+  (`vcsWITSetOwnership`, `vcsSensorSetOwner*`) and test paths (`vcsTestSimulateTakeOwnership`,
+  `vcsTestGenFakeSharedSecret`). **NOT** from getprint/getprintwait/-doinit. => running the capture path
+  never auto-pairs; prior art's SSL success means THEIR machine already had owner creds from a prior
+  setowner. Their pyusb PoC got alert 0x2f because it used ONLY the sensor pubkey (standard CKE) and never
+  presented/used the host owner key -> **0x2f (illegal_parameter) = "not the owner"**, a pairing gate,
+  exactly as they suspected but never located.
+- `scsSensorSendTakeOwnership_V4` @0x508760 sends VCSFW **cmd 0x0f** (66-byte payload) via scsSend, then
+  0x13 (9B) and 0x17 (1B). Whole TakeOwnership path calls **only scsSend/scsSensorSendCommand — NO OTP,
+  flash, erase, or Poke.** `ResetOwnership` exists (reversible). => pairing is a **reversible secure-storage
+  write, not a one-time OTP burn.**
+- BUT `GetOwnershipInfo` help = "Get Ownership total cycles and available cycles number" => ownership
+  changes are a **finite, counted resource** (limited cycles). So each TakeOwnership consumes a cycle.
+- Pairing crypto uses **Diffie-Hellman**: `scsDHEstablishSessionKey` @0x516700 is called from the
+  TakeOwnership-reply store path (0x4ebb65/…/0x4ebe66) — i.e. host+sensor agree the 32-byte shared secret
+  (`s_key`, id 1) via DH during pairing; the host also registers an RSA keypair (id 12 pub / id 13 priv).
+
+### Verdict on the pairing secret (answers the step-3 question)
+- It is **NOT a universal key baked into the binary**, and **NOT derived from the serial**. It is a
+  **per-pairing host-side credential set** (RSA owner keypair `HAPrivKey`/id-12 + a DH-derived 32-byte
+  shared secret `s_key`) created at first `setowner`, stored host-side in `/etc/ValidityPersistentData`
+  (GSKGlobal-wrapped), and MATCHED by an **owner record the sensor stores internally** (written by cmd
+  0x0f, cycle-limited, reversible via ResetOwnership).
+- => An open, HP-free login path **is feasible**: pair ONCE with our own keypair using an open
+  reimplementation of TakeOwnership (cmd 0x0f), store the keypair in our own format, and run an open
+  session that authenticates as owner. No HP code in the login path, no proprietary secret required.
+- COST/RISK of proceeding: pairing (a) consumes one of a limited number of ownership cycles, and (b) may
+  overwrite/disrupt any EXISTING owner (e.g. a Windows fingerprint pairing) on this sensor. This is a
+  persistent, cycle-limited sensor write => requires explicit user authorization before sending cmd 0x0f.
+
+### Still to reverse (static, safe) before any pairing attempt
+1. The exact **cmd 0x0f (TakeOwnership) payload/DH exchange** and its reply (so an open pairing is exact).
+2. The exact **owner-key usage in the SSLv3 handshake** (how ctx+0x530 priv / ctx+0x124 pub / ctx+0x148
+   s_key authenticate the client) — resolves the last gap in prior art's reversed session.
+3. Whether reading ownership state (cmd 0x26) needs the security-mgmt patch/session first (got 0x0401 raw).
+
+### Tools installed this session (for the user's record)
+- `sudo dnf install strace rizin` (+deps: rizin-common, libtree-sitter0.25).
+- Python venv at .venv with `pyusb` (1.3.1).
