@@ -361,3 +361,25 @@ Traced HP `getprintwait -doinit` under gdb (scsSend plaintext dump) + usblog (ep
 - Open CAPTURE: capture command + framing known; image data captured. Remaining: reproduce the
   post-handshake capture sequence as AppData in the open client + decode (prior art's descramble/assembly
   is the decode spec).
+
+---
+
+## 2026-09-26 — Open image decode built; traced swipe was too light (needs a cleaner capture)
+
+- Built scripts/decode_image.py: OPEN raw-ep2 DLI decoder. Confirmed frame format on our data:
+  fixed **208-byte frames** = `01 fe <seq:u16> <f4> <f5> <width> 00` + **200 pixel bytes** (8-bit direct);
+  the header width byte is NOT the length (prior art's drift trap — solved by fixed 208 stride).
+  Main-image descramble = reverse each 200-byte line (perm[0:200]=199..0, from vfs495-linux table).
+  Parsed 6 frame-runs (up to 255 lines) cleanly -> proves the open framing/descramble works.
+- BUT the captured swipe has **no ridge signal**: per-line std ~6.7 (a real print is much higher), no
+  ~10–12px horizontal ridge frequency. => the finger swipe in that trace was too light/mistimed
+  (getprintwait retried 17x, consistent with a poor finger). captures/open_fingerprint.png = mostly noise.
+- Not a decode bug: the pipeline extracts and orders frames correctly; there simply were no ridges to show.
+  A firmer, well-timed swipe (~3s after capture arms, slow ~1.5s full-fingertip drag) should yield ridges.
+
+### Honest status of the CAPTURE path
+- Transport: open session works; capture cmd 0x02 identified; ep2 image framing decoded openly.
+- Missing: a cleanly-captured swipe to validate the open decode end-to-end (image quality is a swipe-
+  timing issue, not a protocol gap). Prior art's fallback for descrambled lines is a gdb RAM dump of
+  UnpackLineRT — proven but uses HP's decode; our decode_image.py is a fully-open alternative pending a
+  good swipe.
