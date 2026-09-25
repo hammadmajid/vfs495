@@ -51,7 +51,7 @@ See [`NOTES.md`](NOTES.md) for the full reverse-engineering log and evidence.
 | `src/usb.rs`      | libusb transport (EP1 OUT/IN, EP2 image)                              |
 | `src/session.rs`  | init replay + open handshake → active record layer                    |
 | `src/capture.rs`  | in-session capture command + EP2 stream read                          |
-| `src/image.rs`    | DLI frame demux, column descramble, normalization → PGM               |
+| `src/image.rs`    | `UnpackLineRT` port (mode 4/8/general), descramble, assembly, reconstruction → PGM |
 | `src/virtimage.rs`| feed a decoded image to `$FP_VIRTUAL_IMAGE`                           |
 
 The crypto is validated **byte-exact** against a live trace of HP's binary — run
@@ -100,7 +100,10 @@ vfs495 handshake
 
 # 4. Capture a swipe and decode it to a PGM
 vfs495 capture --out capture.bin
-vfs495 decode --input capture.bin --out fingerprint.pgm
+vfs495 decode --input capture.bin --out fingerprint.pgm    # unpack + descramble + reconstruct
+
+# ...or reconstruct from already-descrambled scan lines (fully-open, verifiable offline):
+vfs495 decode-lines --input captures/lines.raw --out fingerprint.pgm
 
 # 5. End-to-end: hand a live swipe to libfprint's virtual_image
 FP_VIRTUAL_IMAGE=/run/user/$(id -u)/vfs495.sock
@@ -120,16 +123,22 @@ libfprint is proven in [`scripts/vimage_proof.py`](scripts/vimage_proof.py).
 
 ## Limitations
 
-- **Open image assembly is incomplete.** HP's pipeline assembles a width-264 main
-  image interleaved with width-200 navigation frames (`irDliRTFalconData` /
-  `UnpackLineRT`). This driver decodes the width-200 fixed-frame path; porting the
-  full width-264 demux to open code is the main remaining work. A clean reference
-  fingerprint captured via that path lives in the RE log.
+- **Image assembly is ported and verified on real data; the raw-EP2 unpack needs a
+  one-time config dump.** `src/image.rs` is a clean-room reimplementation of
+  `UnpackLineRT` (all three modes) plus line assembly and reconstruction. The
+  descrambled-lines path (`decode-lines`) is proven offline: it reconstructs the
+  real 264-wide capture into a fingerprint with clear ridge periodicity (~14 px).
+  Unpacking *raw* EP2 frames additionally needs the per-column bit-width table
+  (HP's `cfg+8`), which is capture-specific; dump it once with
+  `scripts/dump_dli_config.gdb.py` (writes `captures/dli_config.json`, which the
+  decoder then uses with no HP binary at capture time).
 - **Unowned sensors only.** Owned sensors need the pairing (`TakeOwnership`) flow
   — fully mapped in `NOTES.md` but not implemented, since it is a persistent,
   cycle-limited sensor write.
-- **RSA modulus is per-device** and currently read from a file rather than the
-  sensor's certificate.
+- **RSA modulus is per-device** and read from `captures/modulus.json`. The sensor
+  delivers it in an opaque signed key blob during init (not a plain SSL
+  certificate), so generic auto-extraction isn't wired up; on a different unit,
+  dump your modulus with `scripts/dump_modulus.gdb.py`.
 
 ---
 

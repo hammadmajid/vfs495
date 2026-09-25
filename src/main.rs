@@ -28,7 +28,7 @@ enum Command {
         #[arg(long, default_value = "captures/ep2_stream.bin")]
         out: PathBuf,
     },
-    /// Decode a raw EP2 dump (or --raw bytes) into a PGM image.
+    /// Decode a raw EP2 dump into a PGM (unpack + descramble + reconstruct).
     Decode {
         /// Raw EP2 byte-stream input.
         #[arg(long)]
@@ -36,12 +36,25 @@ enum Command {
         /// Output PGM path.
         #[arg(long, default_value = "captures/decoded.pgm")]
         out: PathBuf,
-        /// Payload pixels per frame.
-        #[arg(long, default_value_t = 200)]
-        payload: usize,
         /// Frame stride in bytes.
         #[arg(long, default_value_t = 208)]
         stride: usize,
+        /// Keep the full frame instead of cropping to the finger band.
+        #[arg(long)]
+        no_crop: bool,
+    },
+    /// Decode already-descrambled scan lines (`<u16 w><w bytes>` records) to PGM.
+    /// Fully-open path from UnpackLineRT output to a fingerprint image.
+    DecodeLines {
+        /// lines.raw-format input.
+        #[arg(long)]
+        input: PathBuf,
+        /// Output PGM path.
+        #[arg(long, default_value = "captures/decoded.pgm")]
+        out: PathBuf,
+        /// Crop to the finger-present band (off by default; lines.raw is already finger data).
+        #[arg(long)]
+        crop: bool,
     },
     /// Send a PGM image to the libfprint virtual_image socket ($FP_VIRTUAL_IMAGE).
     Feed {
@@ -85,16 +98,28 @@ fn main() -> Result<()> {
             std::fs::write(&out, &stream)?;
             println!("[+] wrote {} ({} bytes)", out.display(), stream.len());
         }
-        Command::Decode { input, out, payload, stride } => {
+        Command::Decode { input, out, stride, no_crop } => {
             let raw = std::fs::read(&input)?;
-            let lines = image::parse_frames(&raw, payload, stride, None);
-            println!("[i] parsed {} lines x {} cols", lines.rows, lines.cols);
+            let cfg = image::DliConfig::load_main(&cli.base)?;
+            let lines = image::decode_ep2(&raw, stride, &cfg);
+            println!("[i] unpacked {} lines x {} cols", lines.rows, lines.cols);
             if lines.rows < 20 {
                 bail!("too few lines ({}) — not a usable swipe", lines.rows);
             }
-            let px = image::normalize(&lines);
-            image::write_pgm(out.to_str().unwrap(), &px, lines.cols, lines.rows)?;
-            println!("[+] wrote {} ({}x{})", out.display(), lines.cols, lines.rows);
+            let (px, w, h) = image::reconstruct(&lines, !no_crop);
+            image::write_pgm(out.to_str().unwrap(), &px, w, h)?;
+            println!("[+] wrote {} ({}x{})", out.display(), w, h);
+        }
+        Command::DecodeLines { input, out, crop } => {
+            let raw = std::fs::read(&input)?;
+            let lines = image::load_lines_raw(&raw);
+            println!("[i] loaded {} lines x {} cols", lines.rows, lines.cols);
+            if lines.rows < 20 {
+                bail!("too few lines ({})", lines.rows);
+            }
+            let (px, w, h) = image::reconstruct(&lines, crop);
+            image::write_pgm(out.to_str().unwrap(), &px, w, h)?;
+            println!("[+] wrote {} ({}x{})", out.display(), w, h);
         }
         Command::Feed { image: img, socket } => {
             let sock = resolve_socket(socket)?;
@@ -109,13 +134,14 @@ fn main() -> Result<()> {
             capture::arm_capture(&dev, &mut rec, &cli.base)?;
             eprintln!(">> swipe your finger now");
             let stream = capture::read_ep2_stream(&dev, 800, 8000);
-            let lines = image::parse_frames(&stream, 200, 208, None);
+            let cfg = image::DliConfig::load_main(&cli.base)?;
+            let lines = image::decode_ep2(&stream, 208, &cfg);
             if lines.rows < 20 {
                 bail!("capture produced too few lines ({})", lines.rows);
             }
-            let px = image::normalize(&lines);
-            virtimage::send_image(&sock, &px, lines.cols as u32, lines.rows as u32)?;
-            println!("[+] captured {}x{} and fed virtual_image", lines.cols, lines.rows);
+            let (px, w, h) = image::reconstruct(&lines, true);
+            virtimage::send_image(&sock, &px, w as u32, h as u32)?;
+            println!("[+] captured {}x{} and fed virtual_image", w, h);
         }
     }
     Ok(())

@@ -1,19 +1,142 @@
-//! Open decode of the VFS495 raw EP2 DLI stream into a grayscale image.
+//! Open decode of VFS495 image data.
 //!
-//! Frame format (reverse-engineered, confirmed on our captures):
-//!   `01 fe <seq:u16 LE> <f4> <f5> <width:u8> 00` then `<payload>` pixel bytes.
-//! Frames are FIXED size: 8-byte header + `payload` pixels, delimited by `01 fe`
-//! and spaced `stride` apart. The width byte is NOT the frame length — treating
-//! it as one is the drift trap earlier drivers fell into.
+//! Two stages, mirroring HP's `irDliRTFalconData` / `UnpackLineRT`:
 //!
-//! Column descramble for the main image is a per-line reversal (equivalently
-//! `perm[i] = width-1-i`); an explicit permutation table may be supplied.
+//!   1. **Unpack** ([`unpack_line`]) — turn one packed scan line into a
+//!      descrambled row of 8-bit pixels. This is a clean-room reimplementation
+//!      of `UnpackLineRT` (three modes; see below), driven by an open
+//!      [`DliConfig`] rather than HP's opaque config blob.
+//!   2. **Assemble + reconstruct** ([`load_lines_raw`] / [`reconstruct`]) — stack
+//!      the descrambled rows into an image, remove the fixed column pattern,
+//!      apply local-contrast normalization, optionally crop to the swipe.
 //!
-//! NOTE — remaining open-decode gap: HP's full pipeline also assembles a
-//! width-264 main image interleaved with width-200 navigation frames
-//! (irDliRTFalconData / UnpackLineRT). That demux is not yet ported to open
-//! code; this module decodes the width-200 main-frame path that our reference
-//! `scripts/decode_image.py` established. See NOTES.md.
+//! ### UnpackLineRT modes (from the binary at 0x46f510)
+//!   * **mode 8** — one source byte per pixel: `dst[perm[i]] = src[i]`.
+//!   * **mode 4** — two pixels per byte: low nibble `<<4` → `perm[i]`, high nibble
+//!     (kept in place) → `perm[i+1]`.
+//!   * **general** — variable-bit samples: sample `i` uses `bits[i]` bits (clamped
+//!     to `max_bits`), read little-endian from the packed stream, left-justified
+//!     to 8 bits (`<< (8 - w)`), then scattered via `perm[i]`.
+//!
+//! The permutation table is our `captures/perm_264.bin` (HP keeps it at
+//! `cfg+0x57c`). The per-column `bits` table (HP: `cfg+8`) is capture-specific;
+//! dump it once with `scripts/dump_dli_config.gdb.py` for the raw-EP2 path.
+
+use anyhow::{Context, Result};
+use std::path::Path;
+
+/// Open equivalent of HP's DLI unpack config blob.
+#[derive(Clone)]
+pub struct DliConfig {
+    /// 4, 8, or any other value → the general variable-bit path.
+    pub mode: u32,
+    /// Number of output pixels per line.
+    pub width: usize,
+    /// Max bits per sample (general path clamp; HP: low nibble of the width byte).
+    pub max_bits: u32,
+    /// Per-column bit widths (general path only).
+    pub bits: Vec<u8>,
+    /// Column descramble: output index for source column `i`.
+    pub perm: Vec<i16>,
+}
+
+impl DliConfig {
+    /// Main-image config: perm from `captures/perm_264.bin`, width 264.
+    /// `mode`/`bits` default to a plain 8-bit scatter and may be overridden by
+    /// `captures/dli_config.json` when present (see `dump_dli_config.gdb.py`).
+    pub fn load_main(base: &Path) -> Result<Self> {
+        let perm = load_perm(&base.join("captures/perm_264.bin"))?;
+        let width = perm.len();
+        let cfg_path = base.join("captures/dli_config.json");
+        if cfg_path.exists() {
+            let raw = std::fs::read_to_string(&cfg_path)?;
+            let j: serde_json::Value = serde_json::from_str(&raw)?;
+            let mode = j["mode"].as_u64().unwrap_or(8) as u32;
+            let max_bits = j["max_bits"].as_u64().unwrap_or(8) as u32;
+            // a dumped config carries its own perm + width; fall back to perm_264.bin
+            let perm = j["perm"]
+                .as_array()
+                .map(|a| a.iter().map(|v| v.as_i64().unwrap_or(0) as i16).collect())
+                .unwrap_or(perm);
+            let width = j["width"].as_u64().map(|w| w as usize).unwrap_or(perm.len());
+            let bits = j["bits"]
+                .as_array()
+                .map(|a| a.iter().map(|v| v.as_u64().unwrap_or(8) as u8).collect())
+                .unwrap_or_else(|| vec![8u8; width]);
+            Ok(DliConfig { mode, width, max_bits, bits, perm })
+        } else {
+            Ok(DliConfig { mode: 8, width, max_bits: 8, bits: vec![8; width], perm })
+        }
+    }
+}
+
+fn load_perm(path: &Path) -> Result<Vec<i16>> {
+    let raw = std::fs::read(path).with_context(|| format!("reading perm table {}", path.display()))?;
+    Ok(raw
+        .chunks_exact(2)
+        .map(|c| i16::from_le_bytes([c[0], c[1]]))
+        .collect())
+}
+
+/// Reimplementation of `UnpackLineRT`: unpack one packed line's pixel payload
+/// (i.e. the bytes *after* the 8-byte frame header) into `width` descrambled
+/// 8-bit pixels. Faithful to the three branches of HP's routine.
+pub fn unpack_line(payload: &[u8], cfg: &DliConfig) -> Vec<u8> {
+    let width = cfg.width;
+    let mut out = vec![0u8; width];
+    let put = |out: &mut [u8], i: usize, val: u8| {
+        let p = cfg.perm[i] as usize;
+        if p < out.len() {
+            out[p] = val;
+        }
+    };
+
+    match cfg.mode {
+        8 => {
+            for i in 0..width.min(payload.len()) {
+                put(&mut out, i, payload[i]);
+            }
+        }
+        4 => {
+            let mut i = 0usize;
+            let mut src = 0usize;
+            while i + 1 < width && src < payload.len() {
+                let byte = payload[src];
+                src += 1;
+                put(&mut out, i, (byte & 0x0f) << 4);
+                put(&mut out, i + 1, byte & 0xf0);
+                i += 2;
+            }
+        }
+        _ => {
+            // general variable-bit path
+            let mut byte_idx = 0usize;
+            let mut bitoff = 0u32;
+            for i in 0..width {
+                let mut w = cfg.bits.get(i).copied().unwrap_or(8) as u32;
+                if w > cfg.max_bits {
+                    w = cfg.max_bits;
+                }
+                if w == 0 || w > 8 {
+                    continue;
+                }
+                let b0 = payload.get(byte_idx).copied().unwrap_or(0) as u32;
+                let b1 = payload.get(byte_idx + 1).copied().unwrap_or(0) as u32;
+                let mask = (1u32 << w) - 1;
+                let sample = ((b1 << 8 | b0) >> bitoff) & mask;
+                put(&mut out, i, (sample << (8 - w)) as u8);
+                let nb = bitoff + w;
+                if nb > 7 {
+                    byte_idx += 1;
+                    bitoff = nb - 8;
+                } else {
+                    bitoff = nb;
+                }
+            }
+        }
+    }
+    out
+}
 
 /// A decoded, unreconstructed line matrix (row-major, `f32` intensities).
 pub struct Lines {
@@ -22,9 +145,34 @@ pub struct Lines {
     pub cols: usize,
 }
 
-/// Extract the longest run of fixed-stride frames from a raw EP2 byte stream.
-pub fn parse_frames(buf: &[u8], payload: usize, stride: usize, perm: Option<&[usize]>) -> Lines {
-    // find all 01 fe markers
+/// Parse a `lines.raw`-format buffer: repeated `<u16 LE width><width bytes>`
+/// (the descrambled output of [`unpack_line`] / HP's UnpackLineRT).
+pub fn load_lines_raw(buf: &[u8]) -> Lines {
+    let mut data = Vec::new();
+    let mut rows = 0usize;
+    let mut cols = 0usize;
+    let mut off = 0usize;
+    while off + 2 <= buf.len() {
+        let w = u16::from_le_bytes([buf[off], buf[off + 1]]) as usize;
+        off += 2;
+        if w == 0 || off + w > buf.len() {
+            break;
+        }
+        if cols == 0 {
+            cols = w;
+        }
+        if w == cols {
+            data.extend(buf[off..off + w].iter().map(|&b| b as f32));
+            rows += 1;
+        }
+        off += w;
+    }
+    Lines { data, rows, cols }
+}
+
+/// Extract the longest run of fixed-stride EP2 frames and unpack each with `cfg`.
+/// (For the raw-EP2 path; needs a correct [`DliConfig`] for the frame type.)
+pub fn decode_ep2(buf: &[u8], stride: usize, cfg: &DliConfig) -> Lines {
     let mut marks = Vec::new();
     let mut i = 0usize;
     while i + 1 < buf.len() {
@@ -33,9 +181,7 @@ pub fn parse_frames(buf: &[u8], payload: usize, stride: usize, perm: Option<&[us
         }
         i += 1;
     }
-    // longest contiguous run whose neighbours are exactly `stride` apart
     let (mut best_start, mut best_len) = (0usize, 0usize);
-    let mut run_start = 0usize;
     let mut k = 0usize;
     while k < marks.len() {
         let mut j = k;
@@ -45,36 +191,27 @@ pub fn parse_frames(buf: &[u8], payload: usize, stride: usize, perm: Option<&[us
         if j - k + 1 > best_len {
             best_len = j - k + 1;
             best_start = k;
-            run_start = k;
         }
-        let _ = run_start;
         k = j + 1;
     }
-
     let mut data = Vec::new();
     let mut rows = 0usize;
-    if best_len > 0 {
-        for idx in best_start..best_start + best_len {
-            let body = marks[idx] + 8;
-            if body + payload <= buf.len() {
-                for c in 0..payload {
-                    let src = match perm {
-                        Some(p) => p[c],
-                        None => payload - 1 - c, // reverse
-                    };
-                    data.push(buf[body + src] as f32);
-                }
-                rows += 1;
-            }
+    for idx in best_start..best_start + best_len {
+        let body = marks[idx] + 8; // skip 8-byte header
+        if body <= buf.len() {
+            let line = unpack_line(&buf[body..], cfg);
+            data.extend(line.iter().map(|&b| b as f32));
+            rows += 1;
         }
     }
-    Lines { data, rows, cols: payload }
+    Lines { data, rows, cols: cfg.width }
 }
 
-/// Simple separable box blur (radius `r`) used for local normalization.
+// ---- reconstruction -------------------------------------------------------
+
+/// Separable box blur (radius `r`).
 fn box_blur(src: &[f32], rows: usize, cols: usize, r: usize) -> Vec<f32> {
     let mut tmp = vec![0f32; src.len()];
-    // horizontal
     for y in 0..rows {
         for x in 0..cols {
             let x0 = x.saturating_sub(r);
@@ -86,7 +223,6 @@ fn box_blur(src: &[f32], rows: usize, cols: usize, r: usize) -> Vec<f32> {
             tmp[y * cols + x] = s / (x1 - x0) as f32;
         }
     }
-    // vertical
     let mut out = vec![0f32; src.len()];
     for x in 0..cols {
         for y in 0..rows {
@@ -102,13 +238,12 @@ fn box_blur(src: &[f32], rows: usize, cols: usize, r: usize) -> Vec<f32> {
     out
 }
 
-/// Local mean/contrast normalization → 8-bit ridge image.
+/// Fixed-column-pattern removal + local mean/contrast normalization → 8-bit.
 pub fn normalize(lines: &Lines) -> Vec<u8> {
     let (rows, cols) = (lines.rows, lines.cols);
     if rows == 0 {
         return Vec::new();
     }
-    // subtract per-column fixed pattern (mean over rows)
     let mut res = lines.data.clone();
     for x in 0..cols {
         let mut m = 0f32;
@@ -120,7 +255,6 @@ pub fn normalize(lines: &Lines) -> Vec<u8> {
             res[y * cols + x] -= m;
         }
     }
-    // local contrast normalization
     let mean = box_blur(&res, rows, cols, 8);
     let mut hp = vec![0f32; res.len()];
     for i in 0..res.len() {
@@ -136,10 +270,135 @@ pub fn normalize(lines: &Lines) -> Vec<u8> {
     out
 }
 
+/// Crop to the finger-present band (rows whose activity exceeds a threshold),
+/// bridging short gaps. Returns the row range `[start, end)`.
+pub fn finger_segment(lines: &Lines) -> (usize, usize) {
+    let (rows, cols) = (lines.rows, lines.cols);
+    if rows == 0 {
+        return (0, 0);
+    }
+    // per-row energy = mean |row - column-mean|
+    let mut colmean = vec![0f32; cols];
+    for x in 0..cols {
+        let mut m = 0f32;
+        for y in 0..rows {
+            m += lines.data[y * cols + x];
+        }
+        colmean[x] = m / rows as f32;
+    }
+    let mut energy = vec![0f32; rows];
+    for y in 0..rows {
+        let mut e = 0f32;
+        for x in 0..cols {
+            e += (lines.data[y * cols + x] - colmean[x]).abs();
+        }
+        energy[y] = e / cols as f32;
+    }
+    let mut sorted = energy.clone();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let median = sorted[rows / 2];
+    let max = *sorted.last().unwrap();
+    let thr = median + 0.35 * (max - median);
+
+    let bridge = 100usize;
+    let (mut best, mut best_len) = ((0usize, 0usize), 0usize);
+    let mut i = 0usize;
+    while i < rows {
+        if energy[i] <= thr {
+            i += 1;
+            continue;
+        }
+        let mut j = i;
+        while j < rows {
+            if energy[j] > thr {
+                j += 1;
+            } else {
+                let mut k = j;
+                while k < rows && energy[k] <= thr && k - j < bridge {
+                    k += 1;
+                }
+                if k < rows && energy[k] > thr {
+                    j = k;
+                } else {
+                    break;
+                }
+            }
+        }
+        if j - i > best_len {
+            best_len = j - i;
+            best = (i, j);
+        }
+        i = j + 1;
+    }
+    best
+}
+
+/// Full reconstruction: (optionally crop to the swipe) then normalize.
+/// Returns (pixels, cols, rows). If cropping yields an implausibly small band
+/// (< 1/8 of the input, e.g. a capture that is entirely finger data), the full
+/// frame is kept instead.
+pub fn reconstruct(lines: &Lines, crop: bool) -> (Vec<u8>, usize, usize) {
+    let seg = if crop { finger_segment(lines) } else { (0, lines.rows) };
+    let big_enough = seg.1 > seg.0 && (seg.1 - seg.0) >= lines.rows / 8;
+    let (a, b) = if big_enough { seg } else { (0, lines.rows) };
+    let cropped = Lines {
+        data: lines.data[a * lines.cols..b * lines.cols].to_vec(),
+        rows: b - a,
+        cols: lines.cols,
+    };
+    let px = normalize(&cropped);
+    (px, cropped.cols, cropped.rows)
+}
+
 /// Write a P5 (binary) PGM.
 pub fn write_pgm(path: &str, pixels: &[u8], cols: usize, rows: usize) -> std::io::Result<()> {
     use std::io::Write;
     let mut f = std::fs::File::create(path)?;
     write!(f, "P5\n{cols} {rows}\n255\n")?;
     f.write_all(pixels)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn identity_perm(n: usize) -> Vec<i16> {
+        (0..n as i16).collect()
+    }
+
+    #[test]
+    fn unpack_mode8_scatters_via_perm() {
+        // reverse perm: out[n-1-i] = src[i]
+        let n = 4;
+        let perm: Vec<i16> = (0..n as i16).rev().collect();
+        let cfg = DliConfig { mode: 8, width: n, max_bits: 8, bits: vec![8; n], perm };
+        let out = unpack_line(&[10, 20, 30, 40], &cfg);
+        assert_eq!(out, vec![40, 30, 20, 10]);
+    }
+
+    #[test]
+    fn unpack_mode4_nibble_expand() {
+        // one byte 0xAB -> low nibble 0xB<<4 = 0xB0 at [0], high nibble 0xA0 at [1]
+        let cfg = DliConfig { mode: 4, width: 2, max_bits: 8, bits: vec![8; 2], perm: identity_perm(2) };
+        let out = unpack_line(&[0xAB], &cfg);
+        assert_eq!(out, vec![0xB0, 0xA0]);
+    }
+
+    #[test]
+    fn unpack_general_left_justifies_samples() {
+        // 4-bit samples, mask 0xF, left-justified <<4. byte 0x21 -> s0=1->0x10, s1=2->0x20
+        let cfg = DliConfig { mode: 6, width: 2, max_bits: 4, bits: vec![4, 4], perm: identity_perm(2) };
+        let out = unpack_line(&[0x21], &cfg);
+        assert_eq!(out, vec![0x10, 0x20]);
+    }
+
+    #[test]
+    fn general_matches_mode8_when_8bit() {
+        // with 8-bit samples the general path must equal a straight byte copy
+        let n = 5;
+        let src = [3u8, 250, 7, 128, 64];
+        let cfg8 = DliConfig { mode: 8, width: n, max_bits: 8, bits: vec![8; n], perm: identity_perm(n) };
+        let cfgg = DliConfig { mode: 99, width: n, max_bits: 8, bits: vec![8; n], perm: identity_perm(n) };
+        assert_eq!(unpack_line(&src, &cfg8), unpack_line(&src, &cfgg));
+    }
 }

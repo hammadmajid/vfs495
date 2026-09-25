@@ -34,3 +34,7 @@ captures/*.json.secret
 
 # Rust build artifacts
 /target
+
+# Device configs dumped from HP trace (structural, per-device) — keep out of the repo
+captures/dli_config.json
+captures/capture_cmd.json
