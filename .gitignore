@@ -29,3 +29,5 @@ captures/*.png
 captures/*.pgm
 captures/lines.raw
 captures/perm_*.bin
+captures/plaintext_cmds.txt
+captures/*.json.secret
