@@ -431,3 +431,37 @@ disallowed) — but that layer (fprintd/pam_fprintd/gdm-fingerprint) is stock/un
 
 Conclusion: the virtual_image path is real and works; a Rust helper feeding it is a sound architecture
 for native GDM+sudo. Language choice is decoupled from this integration choice.
+
+---
+
+## 2026-09-26 — Rust driver: crypto + session + capture + decode + virtual_image feeder
+
+Built the open driver in idiomatic Rust (crate `vfs495`, MIT, GitHub-ready). Ported the proven Python
+reference (`scripts/vfs495_open.py`, `scripts/decode_image.py`, `scripts/vimage_proof.py`) to a typed,
+modular crate:
+
+- `src/crypto.rs` — SSLv3 KDF, RSA (LE modulus / PKCS#1 v1.5, big-endian wire), length-less SSLv3 MAC,
+  AES-256-CBC record layer. **`vfs495 selftest` -> PASS** (master + key block byte-exact vs
+  captures/skey_dump.json — same vectors as the Python selftest). Committed unit test for the
+  Finished label. No hardware needed.
+- `src/usb.rs` — rusb transport (EP1 OUT/IN, EP2 image; kernel-driver detach/reattach on Drop).
+- `src/session.rs` — init replay (reads captures/init_seq.json + vendor/patches blobs) + open handshake
+  (ClientHello suites 0044/0043/0042, plain RSA CKE, CCS+Finished). Faithful port of the live-proven flow.
+- `src/capture.rs` — in-session capture command (optional captures/capture_cmd.json) + EP2 stream read.
+- `src/image.rs` — DLI fixed-frame demux (8-byte header + payload, stride 208), column reverse-descramble,
+  local-contrast normalization, PGM out. Validated offline: decoded the existing capture_swipe EP2 stream
+  -> 255x200 image, mean 128 / stdev 56 / full range (real variance, pipeline runs end-to-end).
+- `src/virtimage.rs` — feed `<i32 w><i32 h><pixels>` to $FP_VIRTUAL_IMAGE (the proven libfprint bridge).
+- `src/main.rs` — CLI: selftest / handshake / capture / decode / feed / run.
+
+Packaging: `packaging/70-vfs495.rules` (uaccess udev rule, user installs it — NOT installed by us),
+`README.md` rewritten for the driver (credits saifulmd0/vfs495-linux, libfprint, the Validity RE
+community), `LICENSE` (MIT). `.gitignore` adds /target + Cargo.lock. No HP code committed;
+vendor/patches + modulus stay runtime-supplied per README.
+
+Toolchain installed this session: libusb1-devel (for rusb linkage). Rust crates pulled: rusb, aes, cbc,
+sha1, md-5, num-bigint, num-traits, rand, serde/serde_json, anyhow, clap, hex, log, env_logger.
+
+Remaining open work (documented in README Limitations): width-264 main-frame assembly
+(irDliRTFalconData/UnpackLineRT) in open code; parse RSA modulus from the sensor certificate for
+device portability; pairing/TakeOwnership for owned sensors (persistent write, needs explicit OK).
