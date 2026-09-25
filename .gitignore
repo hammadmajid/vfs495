@@ -38,3 +38,6 @@ captures/*.json.secret
 # Device configs dumped from HP trace (structural, per-device) — keep out of the repo
 captures/dli_config.json
 captures/capture_cmd.json
+
+# Raw capture/pixel dumps (biometric + device data) — never commit
+captures/*.bin

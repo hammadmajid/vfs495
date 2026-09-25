@@ -37,7 +37,7 @@ enum Command {
         #[arg(long, default_value = "captures/decoded.pgm")]
         out: PathBuf,
         /// Frame stride in bytes.
-        #[arg(long, default_value_t = 208)]
+        #[arg(long, default_value_t = 272)]
         stride: usize,
         /// Keep the full frame instead of cropping to the finger band.
         #[arg(long)]
@@ -135,7 +135,7 @@ fn main() -> Result<()> {
             eprintln!(">> swipe your finger now");
             let stream = capture::read_ep2_stream(&dev, 800, 8000);
             let cfg = image::DliConfig::load_main(&cli.base)?;
-            let lines = image::decode_ep2(&stream, 208, &cfg);
+            let lines = image::decode_ep2(&stream, 272, &cfg);
             if lines.rows < 20 {
                 bail!("capture produced too few lines ({})", lines.rows);
             }

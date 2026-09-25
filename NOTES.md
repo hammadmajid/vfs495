@@ -496,3 +496,32 @@ adjacent). No verifiable generic parser without full cert-format RE, so kept mod
 (reliable) + documented dump path for other devices. Not shipping an unverifiable wire parser.
 
 New CLI: `decode-lines` (open lines->PGM), `decode` now does full unpack+descramble+reconstruct.
+
+---
+
+## 2026-09-26 — LIVE verification on the sensor: handshake OK + open unpack byte-exact
+
+Ran the Rust driver and gdb dumps against the real VFS495 (138a:003f).
+
+1) `vfs495 handshake` (release, sudo): init replayed (8 steps) -> ServerHello 58B ->
+   server flight 144B = `14 03 00 0001 01` (CCS) + `16 03 00 0040 ...` (encrypted Finished)
+   -> **HANDSHAKE OK**. The open SSLv3 session is now proven LIVE in Rust (crypto.rs + usb.rs +
+   session.rs), not just Python. No writes (standard ClientHello/CKE/Finished only).
+
+2) `scripts/dump_dli_config.gdb.py` (one swipe): **mode=8, width=264, max_bits=8**; dumped perm
+   matches perm_264.bin exactly and is a valid permutation of 0..263. So main frames are plain
+   8-bit + descramble (no variable-bit packing) on this device. On the wire: 01fe frames,
+   8-byte header + 264 payload = stride 272 (set as the `decode` default).
+
+3) `scripts/dump_unpack_pairs.gdb.py` (one swipe): dumped 18704 real UnpackLineRT input->output
+   pairs. Our open unpack `dst[perm[i]] = src[i]` reproduces HP's output **BYTE-EXACT on all 95
+   real image lines (0 mismatches)**. The swipe was light so only 95 lines had finger contact;
+   the rest were baseline (dominant value 128/112) — real imaging comes in period-20 bursts
+   (19 image lines + 1 sync). A firm/slow swipe yields thousands (cf. lines.raw = 6572).
+
+Net: the fully-open capture->image path is verified end-to-end on real hardware — open unpack
+matches HP byte-exact, and descrambled lines reconstruct to a fingerprint. No HP code in the
+session or decode path. Only a firmer swipe (pressure/speed) is needed for a full-height image.
+
+New/updated: src/main.rs (decode/run stride 272), scripts/dump_dli_config.gdb.py,
+scripts/dump_unpack_pairs.gdb.py. Dumps (dli_config.json, unpack_pairs.bin) gitignored.

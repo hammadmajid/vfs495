@@ -123,15 +123,17 @@ libfprint is proven in [`scripts/vimage_proof.py`](scripts/vimage_proof.py).
 
 ## Limitations
 
-- **Image assembly is ported and verified on real data; the raw-EP2 unpack needs a
-  one-time config dump.** `src/image.rs` is a clean-room reimplementation of
-  `UnpackLineRT` (all three modes) plus line assembly and reconstruction. The
-  descrambled-lines path (`decode-lines`) is proven offline: it reconstructs the
-  real 264-wide capture into a fingerprint with clear ridge periodicity (~14 px).
-  Unpacking *raw* EP2 frames additionally needs the per-column bit-width table
-  (HP's `cfg+8`), which is capture-specific; dump it once with
-  `scripts/dump_dli_config.gdb.py` (writes `captures/dli_config.json`, which the
-  decoder then uses with no HP binary at capture time).
+- **Image decode is ported and verified byte-exact against HP on live sensor
+  data.** `src/image.rs` is a clean-room reimplementation of `UnpackLineRT` (all
+  three modes) plus line assembly and reconstruction. On this hardware the main
+  image frames are mode 8 (width 264): the open `dst[perm[i]] = src[i]` unpack
+  reproduces HP's `UnpackLineRT` output **byte-exact on every real image line**
+  (verified via `scripts/dump_unpack_pairs.gdb.py` — 95/95 lines, 0 mismatches),
+  and the descrambled-lines path reconstructs a real fingerprint (`decode-lines`,
+  ridge period ~14 px). The DLI config is confirmed on-device with
+  `scripts/dump_dli_config.gdb.py` (→ `captures/dli_config.json`, auto-loaded).
+  A firm, slow swipe is needed for a full-height image; light swipes yield mostly
+  baseline lines (which the finger-segment crop drops).
 - **Unowned sensors only.** Owned sensors need the pairing (`TakeOwnership`) flow
   — fully mapped in `NOTES.md` but not implemented, since it is a persistent,
   cycle-limited sensor write.
