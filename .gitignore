@@ -16,3 +16,10 @@ captures/*.bin.raw
 # Editor/OS cruft
 *.swp
 .DS_Store
+
+# HP firmware patch blobs and raw USB traces (HP IP / device dumps) — never commit
+captures/*.usblog
+captures/*.patch
+captures/init_cmds.json
+vendor/patches/
+captures/skey_dump.json

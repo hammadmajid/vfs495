@@ -310,3 +310,32 @@ Built a live-trace harness (scripts/build_harness.sh -> vendor/runtime/, gitigno
 - Pairing/TakeOwnership + the s_key AES-wrap remain fully documented for the general (owned-sensor) case,
   but are NOT required here. No ownership write will be attempted (sensor left unowned/factory).
 - NEXT: build scripts/vfs495_open.py (pyusb): (1) replay init, (2) open SSLv3 session, (3) capture.
+
+---
+
+## 2026-09-26 — *** OPEN SECURE SESSION ESTABLISHED (no HP code in session path) ***
+
+Built scripts/vfs495_open.py: pure-Python (pyusb + cryptography) VFS495 SSLv3 client.
+- Crypto (ssl3_prf KDF, RSA PKCS#1 LE-modulus, SSLv3 Finished LE-label, AES-256-CBC length-less-MAC
+  record layer) re-implemented from the RE'd spec and **validated byte-exact offline** against the live
+  gdb dump: `--selftest` => master match TRUE, keyblock match TRUE (captures/skey_dump.json).
+- Init = replay of the exact observed command sequence (captures/init_seq.json); the two DownloadPatch
+  blobs are HP firmware loaded to sensor RAM (vendor/patches/, gitignored — not committed).
+- ClientKeyExchange = plain RSA(premaster) (correct for our UNOWNED sensor; no s_key wrap).
+
+LIVE RESULT (`sudo .venv/bin/python scripts/vfs495_open.py --handshake`):
+```
+[i] init replayed
+[i] ServerHello 58B: 16030000350200002d0300000003a910...
+[i] server flight 144B: 14030000010116030000406a9d632160...
+[+] HANDSHAKE OK — sensor sent CCS/Finished. Secure session established.
+```
+=> The sensor ACCEPTS our open handshake (server CCS+Finished, 144B, same shape as HP's). The prior
+project's alert-0x2f wall is CROSSED — with zero HP code in the session. Root cause of their block
+confirmed: their sensor was owned (needed s_key); ours is unowned (standard SSLv3).
+
+### Remaining to a full open capture
+- Send the in-session capture command (getprint/GetFingerprint) as AppData and read the plaintext image
+  from ep2, then decode/descramble/assemble (prior art's UnpackLineRT/reconstruct is the spec).
+- Needs a finger swipe (~2s after prompt). Will trace HP's getprintwait once to pin the exact in-session
+  command + ep2 framing, then reproduce it open. (Requires user at the sensor.)
