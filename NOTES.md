@@ -525,3 +525,22 @@ session or decode path. Only a firmer swipe (pressure/speed) is needed for a ful
 
 New/updated: src/main.rs (decode/run stride 272), scripts/dump_dli_config.gdb.py,
 scripts/dump_unpack_pairs.gdb.py. Dumps (dli_config.json, unpack_pairs.bin) gitignored.
+
+---
+
+## 2026-09-26 — FULLY-OPEN decode of a real swipe, from raw frames, through the Rust driver
+
+Slow firm swipe under gdb (dump_unpack_pairs -> raw input frames). Rebuilt the on-wire ep2 stream
+from the dumped inputs (272-stride 01fe frames) and ran `vfs495 decode --stride 272`: open mode-8
+unpack + perm_264 descramble + reconstruct -> **264x270 fingerprint, ridges present (FFT peak/mean
+2.29, period ~12px)**. So the complete capture->image path runs in open Rust with no HP code in the
+decode; HP only drove the sensor. Image lines are ~95% mode 8 (perm-scatter, byte-exact); the rest
+of the stream is baseline (no-finger) lines, dropped by the finger-segment crop.
+
+Fix: reconstruct() crop guard was rows/8 (too big for a short finger band in a long baseline stream);
+now keeps any detected band >=20 lines. captures/*.bin and *.png (biometric) gitignored.
+
+Swipe technique that works: one finger, slow (~1.5-2s), firm continuous top->bottom, don't lift
+mid-swipe. ~270-300 finger lines per good swipe. Fully-open CAPTURE (Rust arming cmd 0x02 itself,
+no HP at all) is the next milestone: ~40 in-session commands (02 + per-capture 06 patch uploads +
+1a/12/04/17) traced in order in captures/plaintext_cmds.txt (gitignored) — a deliberate replay to build.

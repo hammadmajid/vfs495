@@ -339,8 +339,11 @@ pub fn finger_segment(lines: &Lines) -> (usize, usize) {
 /// frame is kept instead.
 pub fn reconstruct(lines: &Lines, crop: bool) -> (Vec<u8>, usize, usize) {
     let seg = if crop { finger_segment(lines) } else { (0, lines.rows) };
-    let big_enough = seg.1 > seg.0 && (seg.1 - seg.0) >= lines.rows / 8;
-    let (a, b) = if big_enough { seg } else { (0, lines.rows) };
+    // Keep the detected finger band as long as it is a usable strip (>= 20 lines).
+    // Captures are mostly baseline (no-finger) lines, so the band is often a small
+    // fraction of the total; only fall back to the full frame if detection failed.
+    let usable = seg.1 > seg.0 && (seg.1 - seg.0) >= 20;
+    let (a, b) = if usable { seg } else { (0, lines.rows) };
     let cropped = Lines {
         data: lines.data[a * lines.cols..b * lines.cols].to_vec(),
         rows: b - a,
