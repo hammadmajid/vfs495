@@ -841,3 +841,50 @@ Rework `arm_capture` imaging phase to continuously drain EP2 (don't block on EP1
 latch); confirm no `-108`/re-enum on hardware (no finger). Then a real firm/slow swipe -> EP2 stream ->
 `decode`/`decode-lines` (already proven). Validation asset: `/tmp/usbmon_swipe.txt`
 (scratchpad) is HP's real 23MB swipe on a stable session; the EP2 R:116:2 reads are plaintext frames.
+
+---
+
+## 2026-09-26 (session 4) — *** EP2-STARVATION BLOCKER FIXED: full 42-cmd sequence, ZERO re-enum ***
+
+Implemented the architecture change the last session flagged as NEXT: `arm_capture` no longer blocks
+on an EP1 reply while EP2 sits undrained. The imaging-latch (0x17/0x04) makes the sensor stream image
+data on EP2 as a side effect; leaving that stream ungated caused the ~600ms EP1 stall -> firmware reset
+(-108) -> self-inflicted re-enumeration. HP never gaps EP2.
+
+### Driver changes (committed)
+- usb.rs: added `read_record_split(first_ms, rest_ms)` — a short budget for the *first* byte of an EP1
+  record, a longer one for the remainder once any byte arrives. A first-byte timeout returns Err with
+  nothing consumed, so EP1 can be polled in slices while EP2 is drained between slices without ever
+  losing a partial record. `read_record` now delegates to it (same behavior as before).
+- capture.rs:
+  - `drain_image_bounded(dev, img, quiet_reads, max_ms)` — time-bounded EP2 drain in 16 KiB reads
+    (EP2_CHUNK), replacing the old fixed 256-iteration cap. `drain_image_into` delegates to it.
+  - `read_reply_interleaved(dev, timeout, img)` — waits for one EP1 record while pulling any pending
+    EP2 chunk between short EP1 slices. With no sink it is a plain `read_record`.
+  - `send_cmd_draining(dev, rec, plain, recover, img)` — `send_cmd` plus an optional EP2 sink; the reply
+    wait uses `read_reply_interleaved`. `send_cmd` delegates with `None`.
+  - `arm_capture` now calls `send_cmd_draining(.., Some(&mut img))` and drains with a 2.5s burst budget
+    (EP2_BURST_MS) after each command.
+
+### LIVE RESULT (2026-09-26, no finger, VFS_SWIPE_AT=999 VFS_NO_REHANDSHAKE=1)
+- **All 42 commands returned status OK** (0x0000 / 0x0412). No REJECT, no `-108`, no re-enum, no reopen.
+- Device stayed on **USB address 117 across the entire run** (`lsusb` before == after), TWICE.
+- The imaging-latch bursts drain cleanly: cmd[23]/[27] each streamed ~2.1 MB on EP2 (mean 127.5, sd 73.9)
+  and the sequence continued straight through — matching HP's ~1.7 MB-per-latch-cycle drain in
+  `usbmon_swipe.txt`. Total ~5 MB EP2 with the 2.5s budget (13.9 MB with an 8s budget on the first run).
+- So the EP2-starvation root cause is FIXED. There is no longer any re-enumeration to recover from; the
+  VFS_HP_RESUME / re-handshake recovery paths are now dead weight for the happy path (kept behind gates).
+
+### Note on decode of a no-finger stream (expected, not a regression)
+`decode` on the no-finger dump found only ~11 stride-272 (main-image, width 264) lines. Expected: with no
+finger there is almost no main-image content; the raw stream is mostly baseline + navigation lines
+(stride 208, width 200), exactly as the frame-demux notes describe. `decode` extracts the longest
+fixed-272 run, so it correctly reports "too few lines". Not a decode bug.
+
+### NEXT (needs a physical finger — cannot be done autonomously)
+One firm, slow swipe under `sudo RUST_LOG=info ./target/release/vfs495 capture --out /tmp/swipe.bin`
+(default VFS_SWIPE_AT=16 cues the finger at the poll/imaging boundary), then
+`./target/release/vfs495 decode --input /tmp/swipe.bin --out /tmp/swipe.pgm`. The open decode is already
+proven byte-exact on real lines; this is the end-to-end validation on a live-captured (not gdb-rebuilt)
+swipe. Open question to watch on that run: whether the raw *live* EP2 stream demuxes to the same
+stride-272 01fe frames the gdb-rebuilt stream did (the live no-finger stream mixes 208/272 gaps).

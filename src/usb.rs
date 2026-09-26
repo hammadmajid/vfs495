@@ -90,7 +90,16 @@ impl Sensor {
     /// The poll loop must consume every inbound record in order to keep the CBC IV
     /// chain (`siv`) and receive sequence aligned.
     pub fn read_record(&self, timeout_ms: u64) -> Result<Vec<u8>> {
-        let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
+        self.read_record_split(timeout_ms, timeout_ms)
+    }
+
+    /// Like `read_record`, but with two timeouts: `first_ms` bounds the wait for the
+    /// *first* byte of a record, and `rest_ms` bounds the wait for the remainder once
+    /// any byte has arrived. A timeout before the first byte returns `Err` with
+    /// nothing consumed, so a caller may poll EP1 with a short `first_ms` while
+    /// interleaving other work (draining EP2) without ever losing a partial record.
+    pub fn read_record_split(&self, first_ms: u64, rest_ms: u64) -> Result<Vec<u8>> {
+        let mut deadline = std::time::Instant::now() + Duration::from_millis(first_ms);
         let mut acc: Vec<u8> = Vec::with_capacity(4096);
         let mut chunk = vec![0u8; 4096];
         loop {
@@ -114,7 +123,13 @@ impl Sensor {
                 anyhow::bail!("EP_IN record read timed out (have {} bytes)", acc.len());
             }
             match self.handle.read_bulk(EP_IN, &mut chunk, remaining) {
-                Ok(n) => acc.extend_from_slice(&chunk[..n]),
+                Ok(n) => {
+                    if acc.is_empty() && n > 0 {
+                        // First byte seen: switch to the (longer) continuation budget.
+                        deadline = std::time::Instant::now() + Duration::from_millis(rest_ms);
+                    }
+                    acc.extend_from_slice(&chunk[..n]);
+                }
                 Err(rusb::Error::Timeout) => {
                     anyhow::bail!("EP_IN record read timed out (have {} bytes)", acc.len())
                 }

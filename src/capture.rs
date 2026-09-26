@@ -38,11 +38,28 @@ fn load_sequence(base: &Path) -> Result<Vec<Vec<u8>>> {
         .collect()
 }
 
+/// Size of one EP2 bulk read. HP's driver reads the image stream in 16 KiB
+/// chunks back to back; matching that keeps the sensor's FIFO from filling.
+const EP2_CHUNK: usize = 16384;
+/// Per-read EP2 timeout while a burst is flowing (a 16 KiB chunk lands in ~20 ms).
+const EP2_READ_MS: u64 = 60;
+/// Post-command EP2 drain budget. HP's imaging bursts run ~2.1 s per latch cycle.
+const EP2_BURST_MS: u64 = 2500;
+
 /// Drain all currently-available image bytes from EP2 into `img`.
+///
+/// Reads `EP2_CHUNK`-sized transfers until EP2 has been silent for `quiet_reads`
+/// consecutive reads, or `max_ms` elapses. An imaging burst is ~1.7 MB, so the
+/// bound is by time rather than by read count.
 fn drain_image_into(dev: &Sensor, img: &mut Vec<u8>, quiet_reads: usize) {
+    drain_image_bounded(dev, img, quiet_reads, 6000);
+}
+
+fn drain_image_bounded(dev: &Sensor, img: &mut Vec<u8>, quiet_reads: usize, max_ms: u64) {
+    let start = Instant::now();
     let mut empties = 0;
-    for _ in 0..256 {
-        let chunk = dev.read_image(16384, 60);
+    while start.elapsed() < Duration::from_millis(max_ms) {
+        let chunk = dev.read_image(EP2_CHUNK, EP2_READ_MS);
         if chunk.is_empty() {
             empties += 1;
             if empties >= quiet_reads {
@@ -100,6 +117,21 @@ fn send_cmd(
     rec: &mut Record,
     plain: &[u8],
     recover: Option<&crate::session::Config>,
+) -> Option<(Vec<u8>, u16)> {
+    send_cmd_draining(dev, rec, plain, recover, None)
+}
+
+/// `send_cmd` with an optional EP2 sink. When `img` is `Some`, the wait for each
+/// EP1 reply is interleaved with EP2 reads: the sensor streams image data on EP2
+/// as a side effect of the imaging-latch commands and stalls (then resets with
+/// `-108`) if that stream is left undrained while we block on EP1. HP's driver
+/// never gaps EP2; this keeps it flowing while still collecting the reply.
+fn send_cmd_draining(
+    dev: &mut Sensor,
+    rec: &mut Record,
+    plain: &[u8],
+    recover: Option<&crate::session::Config>,
+    mut img: Option<&mut Vec<u8>>,
 ) -> Option<(Vec<u8>, u16)> {
     // Experiment (VFS_HP_RESUME): snapshot the send-side Record state before this
     // command's encrypt, so if the write hits a re-enumeration we can UNDO its seq/IV
@@ -165,7 +197,7 @@ fn send_cmd(
     let mut last_status = 0xffffu16;
     for attempt in 0..4 {
         let timeout = if attempt == 0 { 3000 } else { 200 };
-        match dev.read_record(timeout) {
+        match read_reply_interleaved(dev, timeout, img.as_deref_mut()) {
             Ok(wire) => {
             if reopened && attempt == 0 {
                 // Raw record type of the first reply: 0x17=appdata (real reply),
@@ -214,6 +246,32 @@ fn send_cmd(
         }
     }
     Some((payload, last_status))
+}
+
+/// Wait up to `timeout_ms` for one EP1 record. With an EP2 sink, poll EP1 in
+/// short slices and pull any pending image chunk between slices so the stream
+/// never backs up; without one, this is a plain `read_record`.
+fn read_reply_interleaved(
+    dev: &Sensor,
+    timeout_ms: u64,
+    img: Option<&mut Vec<u8>>,
+) -> Result<Vec<u8>> {
+    let Some(img) = img else {
+        return dev.read_record(timeout_ms);
+    };
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    loop {
+        // Short first-byte wait; once a record starts, allow it to complete.
+        match dev.read_record_split(20, 2000) {
+            Ok(wire) => return Ok(wire),
+            Err(e) if Instant::now() >= deadline => return Err(e),
+            Err(_) => {}
+        }
+        let chunk = dev.read_image(EP2_CHUNK, 20);
+        if !chunk.is_empty() {
+            img.extend_from_slice(&chunk);
+        }
+    }
 }
 
 /// Poll probe: bring the sensor to poll-ready state (replay the setup+calibration
@@ -345,7 +403,8 @@ pub fn arm_capture(
         // whether the sensor enters an imaging mode that streams EP2 frames without
         // a fresh session (i.e. whether the re-handshake is what causes the reset loop).
         let recover = if std::env::var("VFS_NO_REHANDSHAKE").is_ok() { None } else { Some(cfg) };
-        match send_cmd(dev, rec, plain, recover) {
+        let before = img.len();
+        match send_cmd_draining(dev, rec, plain, recover, Some(&mut img)) {
             Some((_, RESET_SKIPPED)) => {
                 log::info!(
                     "[{i:3}] cmd=0x{cmd_op:02x} -> RE-ENUM, skipped (HP-resume); next cmd tests session survival"
@@ -364,8 +423,11 @@ pub fn arm_capture(
                 break;
             }
         }
-        let before = img.len();
-        drain_image_into(dev, &mut img, 2);
+        // Keep draining until EP2 has been quiet for a few reads, or the burst
+        // budget elapses. HP reads ~1.7 MB (~2.1 s at wire rate) after each
+        // imaging latch before sending the next command; with no finger the sensor
+        // streams baseline frames indefinitely, so the time bound is what ends it.
+        drain_image_bounded(dev, &mut img, 3, EP2_BURST_MS);
         let (mean, sd) = mean_sd(&img[before..]);
         if img.len() > before {
             log::info!("[{i:3}]   EP2 +{}B mean={mean:.1} sd={sd:.1}", img.len() - before);
