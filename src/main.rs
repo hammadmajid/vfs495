@@ -106,7 +106,7 @@ fn main() -> Result<()> {
         Command::Capture { out } => {
             let mut dev = usb::Sensor::open()?;
             let mut rec = session::handshake(&dev, &cfg)?;
-            let mut stream = capture::arm_capture(&mut dev, &mut rec, &cli.base)?;
+            let mut stream = capture::arm_capture(&mut dev, &mut rec, &cli.base, &cfg)?;
             eprintln!(">> swipe your finger now");
             stream.extend(capture::read_ep2_stream(&dev, 1200, 15000));
             std::fs::write(&out, &stream)?;
@@ -151,7 +151,7 @@ fn main() -> Result<()> {
             let sock = resolve_socket(socket)?;
             let mut dev = usb::Sensor::open()?;
             let mut rec = session::handshake(&dev, &cfg)?;
-            let mut stream = capture::arm_capture(&mut dev, &mut rec, &cli.base)?;
+            let mut stream = capture::arm_capture(&mut dev, &mut rec, &cli.base, &cfg)?;
             eprintln!(">> swipe your finger now");
             stream.extend(capture::read_ep2_stream(&dev, 1200, 15000));
             let cfg = image::DliConfig::load_main(&cli.base)?;

@@ -705,3 +705,29 @@ OUTBOUND commands). A bare ack is 2 bytes `00 00` = status 0x0000 = OK.
    present finger avoids the reset and yields a real (non-baseline) image on EP2.
 Driver: session.rs (Finished consumed), usb.rs (read_record), capture.rs (reply decrypt + status decode
 + reopen-on-disconnect). All committed pending a green capture.
+
+### Imaging-latch reset characterized (2026-09-26, same day)
+Wired reply-decryption + reopen + re-handshake recovery into the capture loop and ran the full
+sequence on hardware (no finger; the reset is finger-INDEPENDENT — a firm held finger did NOT prevent
+it). Findings:
+- The **0x04 imaging-latch intrinsically re-enumerates the sensor** (USB disconnect + fresh device
+  number, same 138a:003f). Not a watchdog-for-finger, not the 1-byte 0x17 (skipping 0x17 just moved the
+  reset to 0x04). Every imaging iteration triggers it.
+- The re-enumeration **drops the SSL session** (post-reopen EP1 reads are 5-byte zeros). Re-acquiring the
+  handle is not enough.
+- **Recovery works:** on the reset, reopen() + a fresh `handshake()` re-establishes a session, and the
+  imaging commands then all return OK (0x04 -> status 0x0412 OK; poll 0x02 -> 2402B, status 0x0000).
+  So the whole 186-command sequence completes with valid statuses.
+- BUT re-handshake per iteration (~2s each x ~40 iters) is far too slow to capture a ~2s swipe, and it
+  is almost certainly NOT what HP does. Leading hypothesis: HP re-enumerates ONCE into an imaging mode
+  and stays there reading EP2 frames; OUR re-handshake kicks the device back to session mode, so the
+  next 0x04 re-enters imaging (reset) -> the per-frame reset loop is self-inflicted by re-handshaking.
+
+### Decisive next experiment (needs a finger swipe)
+Trace HP's own getprintwait across the 0x04 reset with usblog preloaded (scripts/trace_capture.gdb.py):
+does HP (a) re-handshake (send 0x11 tunnels) after each 0x04, or (b) re-enumerate ONCE then read EP2
+frames without re-handshaking? That decides whether the open driver should re-handshake per frame
+(slow, current) or switch to an imaging-mode EP2 read after a single reset (fast, swipe-capable).
+Also confirm whether image frames arrive on EP2 (plaintext) during imaging, and how many 0x04s HP sends
+per swipe. Driver now has: poll-probe diagnostic, EP2 spread metric, reopen+re-handshake recovery,
+VFS_SWIPE_AT / VFS_SKIP_17 experiment gates.
