@@ -171,7 +171,19 @@ impl Sensor {
                         let _ = handle.detach_kernel_driver(0);
                         self.reattach = true;
                     }
-                    handle.set_active_configuration(1).ok();
+                    // set_active_configuration(1) re-issues SET_CONFIGURATION even
+                    // when config 1 is already active; libusb treats that as a
+                    // lightweight device reset (endpoints/toggles, and likely the
+                    // firmware SSL session). HP never re-issues it across the 0x04
+                    // re-enumeration, so by default we skip it and only re-claim the
+                    // interface. VFS_REOPEN_SETCONFIG=1 restores the old behavior for
+                    // differential testing (isolating this as the session killer).
+                    if std::env::var("VFS_REOPEN_SETCONFIG").is_ok() {
+                        log::info!("[DEBUG-rss] reopen: issuing set_active_configuration(1)");
+                        handle.set_active_configuration(1).ok();
+                    } else {
+                        log::info!("[DEBUG-rss] reopen: skipping set_active_configuration(1)");
+                    }
                     if handle.claim_interface(0).is_ok() {
                         self.handle = handle;
                         return Ok(());

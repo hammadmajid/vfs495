@@ -131,6 +131,7 @@ pub fn ssl3_finished(master: &[u8], hs_msgs: &[u8], label: &[u8]) -> Vec<u8> {
 }
 
 /// SSLv3 record layer once the AES-256-CBC + SHA1 cipher is active.
+#[derive(Clone)]
 pub struct Record {
     cmac: [u8; 20],
     smac: [u8; 20],

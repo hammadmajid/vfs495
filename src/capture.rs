@@ -16,6 +16,12 @@ use std::time::{Duration, Instant};
 
 const APPDATA: u8 = 0x17;
 
+/// Sentinel status returned by `send_cmd` when VFS_HP_RESUME handled a
+/// re-enumeration by skipping the (undelivered) reset-triggering command and
+/// keeping the SSL Record continuous, so the caller should proceed to the next
+/// command rather than treat this as a reject. Not a real device status.
+const RESET_SKIPPED: u16 = 0xfffe;
+
 /// Load the in-session command sequence (list of plaintext hex strings).
 fn load_sequence(base: &Path) -> Result<Vec<Vec<u8>>> {
     let path = base.join("captures/capture_seq.json");
@@ -95,8 +101,15 @@ fn send_cmd(
     plain: &[u8],
     recover: Option<&crate::session::Config>,
 ) -> Option<(Vec<u8>, u16)> {
+    // Experiment (VFS_HP_RESUME): snapshot the send-side Record state before this
+    // command's encrypt, so if the write hits a re-enumeration we can UNDO its seq/IV
+    // advance and continue the session exactly as HP does (HP never resends the
+    // reset-triggering command; it just sends the next poll with continuing seq).
+    let hp_resume = std::env::var("VFS_HP_RESUME").is_ok();
+    let pre_encrypt = rec.clone();
     let mut record = rec.encrypt(APPDATA, plain);
     let mut wrote = false;
+    let mut reopened = false;
     for _ in 0..4 {
         match dev.write(&record, 4000) {
             Ok(_) => {
@@ -111,6 +124,19 @@ fn send_cmd(
                         log::warn!("reopen failed: {re}");
                         std::thread::sleep(Duration::from_millis(100));
                         continue;
+                    }
+                    reopened = true;
+                    if hp_resume {
+                        // HP-faithful: the undelivered command never reached the sensor,
+                        // so roll the Record back and DON'T resend it. Continue to the
+                        // next poll with an unbroken SSL sequence.
+                        *rec = pre_encrypt;
+                        log::info!(
+                            "[DEBUG-rss] HP-resume: reopened, rolled back cmd 0x{:02x} (seq continuous), \
+                             continuing WITHOUT resend/re-handshake",
+                            plain[0]
+                        );
+                        return Some((Vec::new(), RESET_SKIPPED));
                     }
                     // The re-enumeration drops the SSL session (post-reset reads are
                     // zeros). HP re-establishes it via a path not captured in the
@@ -140,16 +166,50 @@ fn send_cmd(
     for attempt in 0..4 {
         let timeout = if attempt == 0 { 3000 } else { 200 };
         match dev.read_record(timeout) {
-            Ok(wire) => match rec.decrypt(&wire) {
+            Ok(wire) => {
+            if reopened && attempt == 0 {
+                // Raw record type of the first reply: 0x17=appdata (real reply),
+                // 0x15=alert (session ALIVE but our seq/MAC desynced), all-zero
+                // header => session DEAD (device not speaking SSL on EP1).
+                let hdr: Vec<u8> = wire.iter().take(5).copied().collect();
+                let kind = match wire.first() {
+                    Some(0x17) => "appdata",
+                    Some(0x15) => "ALERT(session-alive!)",
+                    Some(0x16) => "handshake",
+                    _ if wire.iter().take(3).all(|&b| b == 0) => "ZEROS(session-dead)",
+                    _ => "other",
+                };
+                log::info!("[DEBUG-rss] first-reply raw hdr={hdr:02x?} => {kind}");
+            }
+            match rec.decrypt(&wire) {
                 Ok((_t, plain_reply)) => {
                     let (status, _plen) = parse_reply(&plain_reply);
+                    if reopened && attempt == 0 {
+                        log::info!(
+                            "[DEBUG-rss] post-reopen first reply DECRYPTED status=0x{status:04x} \
+                             payload={}B => SESSION {}",
+                            plain_reply.len().saturating_sub(2),
+                            if status_is_ok(status) { "SURVIVED" } else { "?(status not OK)" }
+                        );
+                    }
                     last_status = status;
                     if plain_reply.len() > 2 {
                         payload.extend_from_slice(&plain_reply[2..]);
                     }
                 }
-                Err(e) => log::warn!("reply decrypt failed: {e}"),
-            },
+                Err(e) => {
+                    if reopened && attempt == 0 {
+                        log::info!(
+                            "[DEBUG-rss] post-reopen first reply DECRYPT FAILED ({e}) \
+                             => SESSION DEAD (wire {} bytes: {:02x?})",
+                            wire.len(),
+                            &wire[..wire.len().min(8)]
+                        );
+                    }
+                    log::warn!("reply decrypt failed: {e}");
+                }
+            }
+            }
             Err(_) => break,
         }
     }
@@ -286,6 +346,11 @@ pub fn arm_capture(
         // a fresh session (i.e. whether the re-handshake is what causes the reset loop).
         let recover = if std::env::var("VFS_NO_REHANDSHAKE").is_ok() { None } else { Some(cfg) };
         match send_cmd(dev, rec, plain, recover) {
+            Some((_, RESET_SKIPPED)) => {
+                log::info!(
+                    "[{i:3}] cmd=0x{cmd_op:02x} -> RE-ENUM, skipped (HP-resume); next cmd tests session survival"
+                );
+            }
             Some((payload, status)) => {
                 let ok = status_is_ok(status);
                 log::info!(
