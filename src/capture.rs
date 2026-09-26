@@ -66,7 +66,10 @@ fn parse_reply(plain: &[u8]) -> (u16, usize) {
 }
 
 fn status_is_ok(status: u16) -> bool {
-    status == 0x0000 || status == 0x0412 || (status & 0x0400) == 0
+    // scsSensorParseReply_V4 does exact-match dispatch: only 0x0000 and 0x0412 map
+    // to the OK path; every other code (incl. others with bit 0x0400 set, e.g.
+    // 0x0401/0x0407/0x0431) is an error. Do NOT treat "bit 0x0400 clear" as OK.
+    status == 0x0000 || status == 0x0412
 }
 
 /// Mean and standard deviation of a byte slice (pixel spread). A flat no-finger

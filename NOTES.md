@@ -758,3 +758,27 @@ FIX DIRECTION for next session:
 BONUS: /tmp/hp_getprint.usblog EP2 (R ep=0x02) reads contain a REAL fingerprint swipe (plaintext) to
 validate the open decode against. (Both /tmp logs are chmod 644; they are biometric+trace data — do NOT
 commit; treat as gitignored scratch.)
+
+### Adversarial review corrections (2026-09-26) — before handoff
+An adversarial subagent re-checked this session's claims against the logs, code and binary. Confirmed:
+numbers (110/110/1046 W/R/img, 11 R(err), 2 tunnels @lines 19,21 pre-first-reset, 99 in-session records),
+the reply=u16-LE-status reading, and that HP sends NO re-handshake after any reset. Corrections applied:
+- **status decode:** the "bit 0x0400 set = error" rule of thumb is WRONG (0x0412 has that bit but is OK).
+  scsSensorParseReply_V4 does exact-match: OK = {0x0000, 0x0412}, everything else = error. status_is_ok
+  fixed accordingly.
+- **"session survives re-enumeration with nothing needed" OVERREACHES.** usblog.so hooks only bulk
+  read/write; a full re-enumeration (new device number) forces HP to re-open + re-claim via control
+  transfers that the log CANNOT show. Proven: HP does not re-handshake (SSL layer). Unproven: what
+  control-plane recovery HP does. So "just resend on the new handle" is not established as sufficient.
+- **set_active_configuration(1) is CANDIDATE #1, not THE fix (untested).** Co-equal alternative: Record
+  seq/IV continuity — every prior death occurred WITH both set_active_configuration AND re-handshake in
+  the loop, so the exact target config (reopen w/o set_config AND keep the same Record w/o re-handshake,
+  with correct seq accounting for the reset-triggering command) has NEVER been run. Next session must
+  test that combination and isolate the cause; don't assume removing set_active_configuration alone fixes it.
+- **"each 0x04 -> one reset" is inference:** hp_cmds.txt has 9x 0x04 but the wire shows 11 R(err); not 1:1.
+- **SecurityParams:** conclusion (empty on this plaintext sensor -> omit) holds, but the earlier mechanism
+  claim ("fresh random via palCryptoRng, not SSL-derived") is NOT supported by scsGetSecurityParams
+  disassembly (it calls scsSSLGetSessionKeyLength/_scsSensorFpEncInit/_scsSensorFpSignInit); retract that
+  mechanism unless re-verified.
+- Nit: 74 (not 75) in-session records after the first reset.
+- Final wire record is an encrypted 15 03 alert (line 1277) — likely close_notify/teardown; uncharacterized.
