@@ -888,3 +888,48 @@ One firm, slow swipe under `sudo RUST_LOG=info ./target/release/vfs495 capture -
 proven byte-exact on real lines; this is the end-to-end validation on a live-captured (not gdb-rebuilt)
 swipe. Open question to watch on that run: whether the raw *live* EP2 stream demuxes to the same
 stride-272 01fe frames the gdb-rebuilt stream did (the live no-finger stream mixes 208/272 gaps).
+
+---
+
+## 2026-09-26 (session 4b) — "too few lines" DIAGNOSED: raw live EP2 ≠ decodable frames (transform is UNSOLVED)
+
+A live firm swipe now runs the full 42-cmd sequence cleanly (session-4 fix holds: no re-enum), but
+`decode /tmp/swipe.bin` still reports "too few lines (11)". Root cause is NOT swipe quality and NOT the
+transport fix — it is a decode-layer gap that prior "proofs" masked.
+
+Evidence (all from /tmp/swipe.bin + captures/ep2_stream.bin + usbmon_swipe.txt):
+- **The frames that decode to a fingerprint are type `b4=06 b5=06`.** captures/ep2_stream.bin (the
+  "proven" stream) is **100% `06 06`** frames (24921/24921), payload entropy ~6, real ridge structure.
+- **The raw LIVE EP2 stream contains ZERO `06 06` frames.** Its 01fe frames are a scatter of other types
+  (08 01 nav, 00 00 blank, 05 05, 04 04, 01 01, 0f 08 …) with payloads that are near-zero (blank main,
+  entropy ~1) or low-sd (nav, entropy ~5) — no ridge image.
+- **The bulk of live EP2 (the two ~2.1 MB imaging bursts after the 0x17/0x04 latch) is entropy 7.999
+  bits/byte — effectively random**, flat byte histogram, no line-period autocorrelation, no `17 03 00`
+  (so NOT SSL-record-wrapped), only 79 stray 01fe in 4.3 MB.
+- **HP's RAW EP2 is the same:** the usbmon reconstruction (52 KB sample, data-length-limited) is
+  entropy 7.97 with the same junk frame-types (00 00 / 01 01 / 08 01 / 05 05 / 04 04) and NO `06 06`;
+  mid-burst bytes are pure random (`d5e07684 eb18e667 …`).
+
+Conclusion: **`captures/ep2_stream.bin` was rebuilt from gdb-dumped UnpackLineRT *inputs* — i.e. HP's
+POST-transform data harvested from RAM inside the driver — not raw EP2.** The raw EP2 wire stream (entropy
+~8) is transformed by HP's code (irDliRTFalconData assembly, and very likely a decrypt/depacketize step)
+into the `06 06` frames that UnpackLineRT then descrambles. That raw-EP2 → `06 06`-frame transform was
+NEVER reverse-engineered; the "byte-exact decode" only ever validated UnpackLineRT (the descramble),
+running on HP-harvested intermediate data. So the open path has always been missing this step — it was
+just hidden because every decode ran on the post-transform stream. NOTES already called irDliRTFalconData
+"the known-hard unsolved open problem"; this session proves it is the exact wall for a live open capture.
+
+### Leading hypothesis for the transform
+EP2 imaging data is encrypted (entropy ~8, no SSL framing) — plausibly under the SAME session keys the
+driver already has (crypto.rs AES-256-CBC), as a raw keystream/block stream with no record headers.
+Testable next: RE HP's EP2 read path (near the poll loop @0x456320 / irDliRTFalconData) to find whether
+EP2 bytes are fed through a cipher before framing, and with what key/IV/chunking. If it is the session
+key, the open driver can decrypt EP2 with machinery it already has, then the existing 272/`06 06` decode
+should light up. If instead it is bit-unpacking (variable-bit mode, not this device's mode-8), the entropy
+argues against it, but confirm from the config.
+
+### Correction to the record
+Prior top-line "open session + DECODE proven" / "real fingerprint captured end-to-end" overstated the
+decode: the SECURE SESSION and TRANSPORT are proven open and live; the DECODE of a raw live EP2 capture
+is NOT — it depends on an unsolved raw-EP2 transform. The fingerprint image was produced from HP-RAM-
+harvested intermediate data, not from a fully-open capture.
