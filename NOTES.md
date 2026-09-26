@@ -731,3 +731,30 @@ frames without re-handshaking? That decides whether the open driver should re-ha
 Also confirm whether image frames arrive on EP2 (plaintext) during imaging, and how many 0x04s HP sends
 per swipe. Driver now has: poll-probe diagnostic, EP2 spread metric, reopen+re-handshake recovery,
 VFS_SWIPE_AT / VFS_SKIP_17 experiment gates.
+
+### HP getprintwait wire trace — the RESET is survivable WITHOUT re-handshake (2026-09-26)
+Traced HP's own getprintwait across the resets (usblog.so raw EP1/EP2 + scsSend gdb hook; one swipe).
+/tmp/hp_getprint.usblog: 110 W ep=0x01, 110 R ep=0x01, 1046 R ep=0x02 (image), 11 R(err) ep=0x02 (the
+re-enumerations). DECISIVE:
+- Only **2** `0x11` tunnels in the whole trace (lines 19,21) = the INITIAL handshake only (same two our
+  session.rs sends). **HP never re-handshakes.** 99 in-session `17 03 00` records, 75 of them AFTER the
+  first reset.
+- At each re-enumeration HP just CONTINUES the same session: right after `R(err) ep=0x02` it sends the
+  `17 03 00` poll (len 2725) and gets the `len 2437` reply — session fully intact, seq continues.
+=> The sensor's SSL session SURVIVES the USB re-enumeration. Our session dies only because of OUR
+   reopen() procedure. Prime suspect: `set_active_configuration(1)` (SET_CONFIGURATION resets device/
+   endpoint state and likely the firmware session); HP does not re-issue it. Also our re-handshake
+   (added as a workaround) is unnecessary and is what made the loop slow.
+
+FIX DIRECTION for next session:
+1. Make Sensor::reopen() re-acquire the handle WITHOUT set_active_configuration(1) (just open + claim_
+   interface(0)); keep the same Record (keys, sseq/rseq, civ/siv) — do NOT re-handshake.
+2. Handle the seq of the reset-triggering command: the 0x04/command that triggers the re-enumeration —
+   determine whether the sensor counted it (rseq/sseq) before dropping USB, so the resend uses the right
+   sseq (HP continues seamlessly, so likely the command is re-sent/continued without a seq gap). Verify
+   by decrypting replies after reopen: if they parse to sane statuses (0x0000/0x0412), the session held.
+3. Then the imaging loop runs at full speed (no ~2s re-handshake per frame) and a real swipe can be
+   captured. HP sends ~99 in-session cmds / ~1046 EP2 reads per swipe.
+BONUS: /tmp/hp_getprint.usblog EP2 (R ep=0x02) reads contain a REAL fingerprint swipe (plaintext) to
+validate the open decode against. (Both /tmp logs are chmod 644; they are biometric+trace data — do NOT
+commit; treat as gitignored scratch.)

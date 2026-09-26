@@ -278,7 +278,11 @@ pub fn arm_capture(
         let cmd_op = plain[0];
         // send_cmd handles the imaging-latch re-enumeration: reopen the handle and
         // re-handshake a fresh session (the reset drops the old one), then resend.
-        match send_cmd(dev, rec, plain, Some(cfg)) {
+        // Experiment: VFS_NO_REHANDSHAKE reopens but does NOT re-handshake, to test
+        // whether the sensor enters an imaging mode that streams EP2 frames without
+        // a fresh session (i.e. whether the re-handshake is what causes the reset loop).
+        let recover = if std::env::var("VFS_NO_REHANDSHAKE").is_ok() { None } else { Some(cfg) };
+        match send_cmd(dev, rec, plain, recover) {
             Some((payload, status)) => {
                 let ok = status_is_ok(status);
                 log::info!(
@@ -292,7 +296,12 @@ pub fn arm_capture(
                 break;
             }
         }
+        let before = img.len();
         drain_image_into(dev, &mut img, 2);
+        let (mean, sd) = mean_sd(&img[before..]);
+        if img.len() > before {
+            log::info!("[{i:3}]   EP2 +{}B mean={mean:.1} sd={sd:.1}", img.len() - before);
+        }
     }
     log::info!("capture replayed ({} commands, {} image bytes)", seq.len(), img.len());
     Ok(img)
