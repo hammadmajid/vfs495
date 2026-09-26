@@ -191,6 +191,27 @@ pub fn handshake(dev: &Sensor, cfg: &Config) -> Result<Record> {
         )),
         0x14 | 0x16 => {
             log::info!("HANDSHAKE OK — secure session established");
+            // Consume the server's post-CCS records (the encrypted Finished) through
+            // the Record layer so the receive sequence number and CBC IV chain (rseq,
+            // siv) advance to their post-handshake state. Without this, decrypting the
+            // first in-session reply would use a stale IV. The CCS record (type 0x14)
+            // is plaintext and not sequence-numbered, so it is skipped, not decrypted.
+            let mut off = 0usize;
+            while off + 5 <= resp.len() {
+                let rtype = resp[off];
+                let ln = u16::from_be_bytes([resp[off + 3], resp[off + 4]]) as usize;
+                let end = off + 5 + ln;
+                if end > resp.len() {
+                    break;
+                }
+                if rtype != 0x14 {
+                    // 0x16 Finished (or any AppData) — advance rseq/siv.
+                    if let Err(e) = rec.decrypt(&resp[off..end]) {
+                        log::warn!("could not sync receive state on server record 0x{rtype:02x}: {e}");
+                    }
+                }
+                off = end;
+            }
             Ok(rec)
         }
         t => Err(anyhow!("unexpected server record type 0x{t:02x}")),
