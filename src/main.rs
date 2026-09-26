@@ -28,6 +28,20 @@ enum Command {
         #[arg(long, default_value = "captures/ep2_stream.bin")]
         out: PathBuf,
     },
+    /// Live diagnostic: reach poll-ready state, then loop the poll command and dump
+    /// each reply payload so a finger touch reveals the finger-contact signal.
+    /// Never fires the imaging trigger, so the sensor does not reset.
+    PollProbe {
+        /// How many leading sequence commands to replay to reach poll-ready state.
+        #[arg(long, default_value_t = 16)]
+        prefix: usize,
+        /// Which sequence index (a 0x02 poll command) to loop.
+        #[arg(long, default_value_t = 16)]
+        poll_idx: usize,
+        /// How many poll iterations to send.
+        #[arg(long, default_value_t = 40)]
+        iters: usize,
+    },
     /// Decode a raw EP2 dump into a PGM (unpack + descramble + reconstruct).
     Decode {
         /// Raw EP2 byte-stream input.
@@ -97,6 +111,12 @@ fn main() -> Result<()> {
             stream.extend(capture::read_ep2_stream(&dev, 1200, 15000));
             std::fs::write(&out, &stream)?;
             println!("[+] wrote {} ({} bytes)", out.display(), stream.len());
+        }
+        Command::PollProbe { prefix, poll_idx, iters } => {
+            let mut dev = usb::Sensor::open()?;
+            let mut rec = session::handshake(&dev, &cfg)?;
+            capture::poll_probe(&mut dev, &mut rec, &cli.base, prefix, poll_idx, iters)?;
+            println!("[+] poll-probe done");
         }
         Command::Decode { input, out, stride, no_crop } => {
             let raw = std::fs::read(&input)?;

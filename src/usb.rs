@@ -81,6 +81,48 @@ impl Sensor {
         Ok(buf)
     }
 
+    /// Read one complete SSLv3 record from EP1 IN.
+    ///
+    /// In-session replies are `<type> 03 00 <len16-be> <ciphertext>` records that
+    /// can span several 64-byte bulk packets, so a single `read_bulk` may return
+    /// only the header or a partial body. This accumulates bulk transfers until the
+    /// full record (5-byte header + `len` body bytes) is present, then returns it.
+    /// The poll loop must consume every inbound record in order to keep the CBC IV
+    /// chain (`siv`) and receive sequence aligned.
+    pub fn read_record(&self, timeout_ms: u64) -> Result<Vec<u8>> {
+        let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
+        let mut acc: Vec<u8> = Vec::with_capacity(4096);
+        let mut chunk = vec![0u8; 4096];
+        loop {
+            // Header first: need 5 bytes to know the record length.
+            let need = if acc.len() < 5 {
+                5
+            } else {
+                let ln = u16::from_be_bytes([acc[3], acc[4]]) as usize;
+                5 + ln
+            };
+            if acc.len() >= need && acc.len() >= 5 {
+                let ln = u16::from_be_bytes([acc[3], acc[4]]) as usize;
+                if acc.len() >= 5 + ln {
+                    let rec = acc[..5 + ln].to_vec();
+                    wire_log("R", EP_IN, &rec);
+                    return Ok(rec);
+                }
+            }
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                anyhow::bail!("EP_IN record read timed out (have {} bytes)", acc.len());
+            }
+            match self.handle.read_bulk(EP_IN, &mut chunk, remaining) {
+                Ok(n) => acc.extend_from_slice(&chunk[..n]),
+                Err(rusb::Error::Timeout) => {
+                    anyhow::bail!("EP_IN record read timed out (have {} bytes)", acc.len())
+                }
+                Err(e) => return Err(anyhow!("EP_IN read failed: {e}")),
+            }
+        }
+    }
+
     /// Read a chunk of the image stream from EP2 IN. Returns an empty Vec on timeout.
     pub fn read_image(&self, max: usize, timeout_ms: u64) -> Vec<u8> {
         let mut buf = vec![0u8; max];

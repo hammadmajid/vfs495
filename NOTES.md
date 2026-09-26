@@ -608,3 +608,100 @@ STATE: open SESSION + open DECODE remain proven end-to-end. Fully-open CAPTURE i
 interactive-protocol RE above. For a usable driver sooner, the alternative is to drive HP's capture
 (getprintwait) and decode its output with our open code — but that keeps a proprietary component in the
 capture path, which is out of scope for a fully-open login path.
+
+---
+
+## 2026-09-26 — Capture state-machine RE: interactive protocol DECODED (fully-open path now concrete)
+
+Reversed HP's capture state machine (binary vendor/runtime/bin/validity-sensor-unlocked, not
+stripped) to turn the "interactive protocol, blocked" conclusion into a concrete open reimplementation
+plan. Four focused disassembly passes; full internal listings kept in scratch (uncommitted), only the
+wire protocol + plan recorded here.
+
+### The reframe (why byte-identical replay was short-rejected)
+NOT cryptographic and NOT a USB/flow bug. The 0x02 poll command carries NO session MAC of its own; the
+rejection is a DEVICE-STATE dependency. The poll references DSP/AFE/calibration state that must be
+(re)established in the current session by the preceding calibration commands. Replaying poll bytes onto
+a sensor whose volatile state isn't set up -> short (~37B) error reply.
+
+Also corrected: SecurityParams is a RED HERRING here. scsGetSecurityParams builds a tag-6 block of
+FRESH RANDOM key/IV (palCryptoRng), gated by the persistent `encryptFPData` flag; it is NOT derived
+from the SSL session keys. On this unowned sensor images stream PLAINTEXT (flag off) -> the block is
+empty/absent. The open driver simply omits it.
+
+### Poll command (scsSensorSendGetFingerprint_V4 @0x5065f0) — on-wire opcode 0x02
+Layout: 02 | BE16(printcfg key8) | BE16(reqfield) | PrintParamBlob | [ConfigReplyParams] |
+[CalibBlob] | [FalconCfgBlob] | [WOE-setup TLV] | [SecurityParams] | [FpBufferingParams].
+Segment inclusion selected by flags/mode; the two observed wire sizes (2691/3033) are just which
+optional blobs are present, NOT two opcodes. CalibBlob = calResultsGetCalibrationDataBlob, serialized
+from a per-session tagval bag (device+0x408). This is the session-specific segment that matters.
+
+### Poll reply + status (scsSensorParseReply_V4 @0x506340) — VCSFW is LITTLE-endian
+Reply plaintext: [0]=0x02 opcode echo, [1..3]=u16 sensor status (LE), [3..]=register TLVs
+("04 03 00 09 00 <reg16> 20 04 30 <val32>"). Status 0x0000/0x0412 = OK; any code with bit 0x0400 set
+= error. The short 37B reject is an ordinary error reply (no payload): its 2 bytes at [1..3] ARE the
+reject reason. NB: esi=0xD1 seen earlier is NOT a reply byte — it's idsSubsystemService's "keep
+polling" service tick; 0xD0/0xD2 are OUTBOUND finger-event codes. Poll loop (idsSensorWOEFingerprintPoll
+@0x456320): status 0 -> phase done, start imaging; nonzero -> error/stop.
+Two error namespaces: transport codes (parseReply, 0x4xx) on a short reject vs BVS-layer codes
+(0x213 section-missing, 0xda/db wrong-mode) emitted while decoding the body of a GOOD 2437B reply.
+
+### Calibration (scsSensorFalconCalibrate @0x4fcb20) — CLOSED-LOOP
+Steps CommDet/PgaOffset/Adc/PgaGain/AspLna1/AspPga1/Woe. Primitives: scsSensorLoadPatch (the 0x06
+uploads), scsSensorGetCountedLinesSynch (the 0x02 counted-line reads). Each step measures the captured
+frame and picks the next trial register value -> command bytes are DATA-DEPENDENT, so you cannot pure-
+replay calibration bytes + parse responses. Converged AFE values are static per sensor and are
+persisted, but program VOLATILE registers that reset each power cycle. Minimum viable open path: run
+the closed loop once, cache tags 1..7, then re-upload fixed patches + re-write cached values each
+session. (Risk, unverified: whether re-writing cached values without a fresh sweep images well across
+temperature drift.)
+
+In-session command stream (captures/capture_seq.json, 186 cmds): 1f setup; calibration block
+(1a+06+02 sweep frames, ~idx 1-13, term 0x12); then the poll loop repeating [17] 04 02(2691) 02(3029).
+
+### Driver changes this session (committed pending live result)
+- crypto: session now decrypts the server post-CCS Finished so rseq/siv advance to post-handshake state
+  (src/session.rs) — required before any in-session reply can be decrypted (send side was already fine,
+  which is why our commands were accepted).
+- usb::read_record(): reads one complete SSLv3 record (accumulates across 64B bulk packets).
+- capture::arm_capture(): now decrypts EVERY reply in order, logs decoded [op,status] per command, and
+  flags/stops at the first 0x02 reject — the decisive diagnostic (no swipe needed; reject precedes
+  imaging). parse_reply()/status_is_ok() implement the parseReply status decode above.
+
+### Next
+Run `sudo RUST_LOG=info ./target/release/vfs495 capture --out /tmp/probe.bin` (no swipe). The first
+0x02 reject's status + index decides: reject at an early (calibration) 0x02 -> implement closed-loop
+calibration; calibration 0x02s OK but poll 0x02 rejects -> calibration state is fine, poll param
+(CalibBlob) is the issue. Result to be folded into this entry before commit.
+
+### LIVE RESULTS (2026-09-26, same day) — "blocked" conclusion OVERTURNED
+Ran the open driver with in-session reply decryption (session.rs now consumes the server Finished so
+rseq/siv advance; usb::read_record frames whole records; capture::arm_capture decrypts every reply).
+Ground-truth reply format from live decryption: **reply plaintext = u16 LE status [+ payload]** (NOT
+"[0]=opcode echo, [1..3]=status" — that earlier read came from agent samples that were actually HP
+OUTBOUND commands). A bare ack is 2 bytes `00 00` = status 0x0000 = OK.
+
+- Commands 0..22 ALL return status 0x0000 OK. The **poll 0x02 commands (seq 16,21,22) return the full
+  2437-byte reply** (plaintext 2404B = status + register TLVs `00 00 00 00 ff f9 87 20 e1 f8 87 00 ...`),
+  status 0x0000, in our FULLY-OPEN session. => The prior "short-reject / capture is an un-replayable
+  interactive protocol" conclusion was an ARTIFACT of misparsing the 2-byte status ack. The polls work.
+- The wall is the **imaging trigger** (seq 23 `0x17`, seq 24 `0x04`): ~6s after the last poll the sensor
+  **re-enumerates** (dmesg: `usb 1-8: USB disconnect` + `new full-speed USB device`, same 138a:003f,
+  new device number). Our write then fails `No such device`.
+- reopen() re-acquires the handle but every subsequent read returns 5 zero bytes — the **SSL session does
+  NOT survive the reset**. A FRESH `vfs495 handshake` right after DOES succeed => device is alive, only
+  the session is lost.
+- Strong hypothesis: the reset is a **watchdog timeout** — we fire the imaging trigger with NO finger
+  present (HP's recorded seq had a finger swiping), the sensor waits ~6s for frames, gets none, resets.
+  I.e. capture IS interactive in the sense that the imaging phase needs a live finger + a finger-aware
+  poll loop; it is NOT that our commands are wrong (they're accepted, status OK).
+
+### Revised remaining work for fully-open capture
+1. Decode the 2437-byte poll reply payload (register TLVs after the status word) to find the
+   finger-contact / frame-ready signal (compare baseline vs finger-present poll reply).
+2. Real poll loop: repeat 0x02 poll until contact detected, THEN run the 17/04/02 frame-read loop while
+   the finger moves, draining EP2. (Fixed-sequence replay without a finger always hits the reset.)
+3. Immediate test: replay the existing sequence WHILE swiping continuously from launch, to see if a
+   present finger avoids the reset and yields a real (non-baseline) image on EP2.
+Driver: session.rs (Finished consumed), usb.rs (read_record), capture.rs (reply decrypt + status decode
++ reopen-on-disconnect). All committed pending a green capture.
