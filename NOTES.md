@@ -782,3 +782,62 @@ the reply=u16-LE-status reading, and that HP sends NO re-handshake after any res
   mechanism unless re-verified.
 - Nit: 74 (not 75) in-session records after the first reset.
 - Final wire record is an encrypted 15 03 alert (line 1277) — likely close_notify/teardown; uncharacterized.
+
+## 2026-09-26 (session 3) — *** THE "RE-ENUMERATION" WAS OUR BUG, NOT THE SENSOR ***
+
+The entire prior premise ("the 0x04 imaging-latch intrinsically re-enumerates the sensor ~11x/swipe,
+so make the SSL session survive the reset") is **FALSE**. Captured HP's own getprintwait across a real
+finger swipe under **usbmon** (control + bulk, not just usblog's bulk): `usbmon_swipe.txt`, 4254 lines.
+
+### Ground truth from the HP swipe (usbmon)
+- HP ran the **entire swipe on ONE stable USB address** (dev 116, line 42→4252). **ONE** GET_DESCRIPTOR,
+  **ONE** SET_CONFIGURATION, **ZERO** port resets, **ZERO** disconnects. **HP never re-enumerates.**
+- EP2: **23 MB** of image data over 1656 clean reads (status 0); only 14 `-2` (ENOENT cancels). EP1: 17
+  clean 2437B poll replies + 159 37-byte records, no zeros, no errors. Session never dropped.
+- => The old usblog "11x R(err) ep=0x02" were just EP2 read cancels (status -2), **NOT** USB
+  re-enumerations. The handoff's whole "session survival across reset" task was chasing a self-inflicted
+  wound.
+
+### Two co-located root causes of OUR re-enumeration
+1. **Corrupted replay sequence.** `captures/capture_seq.json` was built from `clean_cmds.txt`, which was
+   parsed from the **WIRE/bulk stream** where SSL record-type bytes leak in as fake commands: histogram
+   61x`0x17`(AppData type), 34x`0x04`, and even `0x11`(handshake tunnel) + `0x15`(alert). The
+   authoritative HP command layer is `plaintext_cmds.txt` (gdb `scsSend` hook): only 2x`0x17`, 2x`0x04`,
+   17x`0x02`. REBUILT capture_seq.json from plaintext_cmds.txt in-session slice (lines 11..52; 1-8 =
+   pre-handshake init done by session.rs init_seq, 9-10 = 0x11 handshake tunnels done by session.rs,
+   53 = 0x15 close alert). New seq = 42 entries (17x02, 9x1a, 9x06, 2x12, 2x17, 2x04, 1x1f).
+   Regenerate: `python3` filter plaintext_cmds.txt lines 11..52 -> JSON list of the hex payloads.
+   (Both files gitignored — device/trace data.)
+   RESULT: with the clean seq, commands **0..23 ALL return status 0x0000 OK** (setup + calibration + 14
+   polls) vs the old pollution that rejected almost everything.
+2. **EP2 starvation at the imaging trigger (remaining blocker).** With the clean seq the ONLY re-enum is
+   at the first 1-byte `0x17` imaging-latch (idx 24). usbmon of our run: we write 0x17 (37B, completes
+   OK), then BLOCK ~600ms on an EP1 read that never returns, get `-108` (ESHUTDOWN) = device dropped —
+   all while NOT servicing EP2. HP, after arming imaging, drains EP2 **continuously** (23MB) and never
+   gaps it; our synchronous "send EP1 cmd -> block on EP1 reply" loop starves EP2 -> firmware resets.
+   FIX DIRECTION: after the imaging latch, stop blocking on EP1 replies; continuously drain EP2 (HP-style
+   async/interleaved reads). This is an `arm_capture` architecture change, not a sequence fix.
+
+### Hypotheses FALSIFIED this session (with evidence)
+- `set_active_configuration(1)` in reopen(): irrelevant — usbmon shows the **kernel** auto-issues
+  SET_CONFIGURATION(1) on every re-enumeration regardless. (Ran with/without: byte-identical dead result.)
+- HP does a vendor control-plane resume on reopen: NO — HP's control transfers are 100% standard
+  kernel/hub enumeration (GET_DESCRIPTOR/SET_CONFIGURATION/SET_INTERFACE/hub PORT_RESET).
+- Resending 0x04 / SSL seq-continuity across reopen (VFS_HP_RESUME experiment): NO — skipping the
+  undelivered 0x04 and continuing seq-continuous still returned literal ZERO bytes (not an SSL alert),
+  i.e. the session was genuinely gone. Moot anyway now that the re-enum itself is our bug.
+
+### Driver changes (committed)
+- crypto.rs: `#[derive(Clone)]` on Record (snapshot/rollback for the seq experiment).
+- usb.rs: reopen() no longer forces set_active_configuration by default (VFS_REOPEN_SETCONFIG restores
+  it); [DEBUG-rss] logs. HP-faithful and proven inert.
+- capture.rs: VFS_HP_RESUME (skip+rollback the reset-triggering cmd) + RESET_SKIPPED sentinel +
+  [DEBUG-rss] first-reply-kind logging (fires only after a reopen).
+- Diagnostic env gates remain: VFS_SWIPE_AT / VFS_SKIP_17 / VFS_NO_REHANDSHAKE / VFS_REOPEN_SETCONFIG /
+  VFS_HP_RESUME. selftest still PASS.
+
+### NEXT (next session)
+Rework `arm_capture` imaging phase to continuously drain EP2 (don't block on EP1 after the 0x17/0x04
+latch); confirm no `-108`/re-enum on hardware (no finger). Then a real firm/slow swipe -> EP2 stream ->
+`decode`/`decode-lines` (already proven). Validation asset: `/tmp/usbmon_swipe.txt`
+(scratchpad) is HP's real 23MB swipe on a stable session; the EP2 R:116:2 reads are plaintext frames.
