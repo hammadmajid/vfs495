@@ -10,9 +10,13 @@ to libfprint's `virtual_image` driver, which makes the sensor usable through
 stock **fprintd / PAM / GDM / `sudo`** with no custom C kernel or libfprint
 driver.
 
-> Status: research driver. The crypto and open SSLv3 handshake are proven; the
-> capture path works end-to-end; final open image assembly is still being
-> polished (see [Limitations](#limitations)). Contributions welcome.
+> Status: research driver. The open secure session, transport, AES-256-CBC image
+> decryption, decode and reconstruction all run in open Rust and are
+> **live-confirmed on hardware**; a feeder daemon bridges it to libfprint for
+> GNOME/fprintd. Remaining work is integration polish (see [Limitations](#limitations)).
+> Contributions welcome. **A distilled project status & reverse-engineering
+> reference is in [`docs/STATUS.md`](docs/STATUS.md)**; the full dated log is
+> [`NOTES.md`](NOTES.md).
 
 ---
 

@@ -1,5 +1,9 @@
 # VFS495 pairing RE — running log
 
+> This is the chronological, dated log with full reasoning and evidence. For the
+> distilled, organized current-state and reverse-engineering reference, see
+> [`docs/STATUS.md`](docs/STATUS.md).
+
 Device: Validity VFS495, USB **138a:003f**, HP EliteBook 820 G3.
 Host: Fedora 44, libfprint 1.94.100, fprintd 1.94.5 (sensor "known unsupported").
 Goal: open pairing + capture path, no HP code in the login path.
