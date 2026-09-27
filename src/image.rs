@@ -411,13 +411,13 @@ pub fn ridge_peak(px: &[u8], w: usize, h: usize) -> f32 {
     peak / (sum / cnt)
 }
 
-/// Maximum rows in a reconstructed finger image. A swipe assembles into a band a
-/// few hundred lines tall; a *held* finger instead stacks the same region into
+/// Maximum rows in an image fed to libfprint. A swipe assembles into a band a few
+/// hundred lines tall; a *held* finger instead stacks the same region into
 /// thousands of near-identical lines, and libfprint's image drivers reject an
 /// over-tall image ("unrealistically large image") before any minutiae are read.
-/// Cap the output to a normal finger height — also what the minutiae extractor
-/// expects — by taking the central window when the band is longer.
-const MAX_FEED_ROWS: usize = 500;
+/// Used by `window_for_feed` — NOT inside `reconstruct`, because `ridge_peak` is
+/// window-size dependent and the finger gate must be computed on the full image.
+pub const MAX_FEED_ROWS: usize = 500;
 
 pub fn reconstruct(lines: &Lines, crop: bool) -> (Vec<u8>, usize, usize) {
     let seg = if crop { finger_segment(lines) } else { (0, lines.rows) };
@@ -425,13 +425,7 @@ pub fn reconstruct(lines: &Lines, crop: bool) -> (Vec<u8>, usize, usize) {
     // Captures are mostly baseline (no-finger) lines, so the band is often a small
     // fraction of the total; only fall back to the full frame if detection failed.
     let usable = seg.1 > seg.0 && (seg.1 - seg.0) >= 20;
-    let (mut a, mut b) = if usable { seg } else { (0, lines.rows) };
-    // Clamp an over-tall band to a central finger-sized window (see MAX_FEED_ROWS).
-    if crop && b - a > MAX_FEED_ROWS {
-        let mid = (a + b) / 2;
-        a = mid - MAX_FEED_ROWS / 2;
-        b = a + MAX_FEED_ROWS;
-    }
+    let (a, b) = if usable { seg } else { (0, lines.rows) };
     let cropped = Lines {
         data: lines.data[a * lines.cols..b * lines.cols].to_vec(),
         rows: b - a,
@@ -439,6 +433,18 @@ pub fn reconstruct(lines: &Lines, crop: bool) -> (Vec<u8>, usize, usize) {
     };
     let px = normalize(&cropped);
     (px, cropped.cols, cropped.rows)
+}
+
+/// Clamp an image to a central `MAX_FEED_ROWS` window so libfprint accepts it.
+/// Applied only to the pixels that get *fed*, after the finger gate has already
+/// been decided on the full image. A shorter image is returned unchanged.
+pub fn window_for_feed(px: &[u8], w: usize, h: usize) -> (Vec<u8>, usize, usize) {
+    if h <= MAX_FEED_ROWS {
+        return (px.to_vec(), w, h);
+    }
+    let a = (h - MAX_FEED_ROWS) / 2;
+    let b = a + MAX_FEED_ROWS;
+    (px[a * w..b * w].to_vec(), w, MAX_FEED_ROWS)
 }
 
 /// Write a P5 (binary) PGM.

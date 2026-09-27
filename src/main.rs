@@ -175,12 +175,13 @@ fn main() -> Result<()> {
             let (px, w, h) = image::reconstruct(&lines, true);
             let crop_ratio = h as f32 / lines.rows as f32;
             let ridge = image::ridge_peak(&px, w, h);
-            // Mirror capture_frame's gate: rows>=60 AND crop_ratio<=0.6 AND ridge>=min_ridge.
-            let verdict = lines.rows >= 60 && crop_ratio <= 0.6 && ridge >= min_ridge;
+            // Mirror capture_frame's gate exactly: rows>=60 AND ridge>=min_ridge on
+            // the FULL image (crop_ratio is diagnostic only, not part of the gate).
+            let verdict = lines.rows >= 60 && ridge >= min_ridge;
             println!("[i] reconstructed image: {w}x{h}");
             println!("[i]   median_line_std = {line_std:.1}   (noise and finger both high; not a gate)");
-            println!("[i]   crop_ratio      = {crop_ratio:.3}  (finger low, blank near 1.0; gate <= 0.6)");
-            println!("[i]   ridge_peak      = {ridge:.2}   (finger ~1.8, blank noise ~1.1; gate >= {min_ridge})");
+            println!("[i]   crop_ratio      = {crop_ratio:.3}  (diagnostic only, NOT gated)");
+            println!("[i]   ridge_peak      = {ridge:.2}   (THE gate — finger ~2.1, blank noise ~1.2-1.6; gate >= {min_ridge})");
             println!(
                 "[{}] daemon verdict: {}",
                 if verdict { "+" } else { "-" },
@@ -229,8 +230,9 @@ fn main() -> Result<()> {
                 bail!("capture produced too few lines ({})", lines.rows);
             }
             let (px, w, h) = image::reconstruct(&lines, true);
-            virtimage::send_image(&sock, &px, w as u32, h as u32)?;
-            println!("[+] captured {}x{} and fed virtual_image", w, h);
+            let (fpx, fw, fh) = image::window_for_feed(&px, w, h);
+            virtimage::send_image(&sock, &fpx, fw as u32, fh as u32)?;
+            println!("[+] captured {w}x{h} and fed {fw}x{fh} to virtual_image");
         }
         Command::Daemon { socket, min_ridge, once, gap } => {
             let sock = resolve_socket(socket)?;
@@ -270,16 +272,20 @@ fn capture_frame(
     // The sensor streams high-variance noise even with no finger, so neither
     // contrast nor the segmentation crop-ratio can gate (measured live: a held
     // finger leaves crop_ratio near 1.0, same as noise). The reliable finger
-    // signal is the ridge spectral peak-to-mean: ~2.1 with a finger vs ~1.2 for
-    // blank noise. Gate on that alone; crop_ratio is logged for diagnostics only.
+    // signal is the ridge spectral peak-to-mean. Compute it on the FULL image —
+    // it is window-size dependent, so it must not be measured on the clamped feed
+    // window (that inflates noise above the threshold). crop_ratio is diagnostic.
     let crop_ratio = h as f32 / lines.rows as f32;
     let pk = image::ridge_peak(&px, w, h);
     if pk < min_ridge {
         log::debug!("skip: no finger (ridge_peak {pk:.2} < {min_ridge:.2}, crop_ratio {crop_ratio:.2})");
         return Ok(None);
     }
-    log::info!("finger captured: {w}x{h} (ridge_peak {pk:.2}, crop_ratio {crop_ratio:.2})");
-    Ok(Some((px, w as u32, h as u32)))
+    // Passed the gate: clamp the pixels we actually feed to a libfprint-acceptable
+    // height (a held finger stacks thousands of near-identical lines).
+    let (fpx, fw, fh) = image::window_for_feed(&px, w, h);
+    log::info!("finger captured: {w}x{h} (ridge_peak {pk:.2}, crop_ratio {crop_ratio:.2}); feeding {fw}x{fh}");
+    Ok(Some((fpx, fw as u32, fh as u32)))
 }
 
 /// (Re)establish a live session: recover the device (waiting out any USB

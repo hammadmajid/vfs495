@@ -275,21 +275,32 @@ libfprint-acceptable, minutiae-friendly image. (A swipe assembles to a few-hundr
 -line band and is unaffected; the clamp only bites the held-finger case.)
 
 **Remaining:**
-- **Repeated-capture stability — the current blocker for live enroll (2026-09-28).**
-  A single capture/handshake is rock-solid, but repeated back-to-back full captures
-  make the sensor drop off USB and re-enumerate (address walked 005→011 across one
-  failed run), after which every capture fails instantly (`EP_OUT write failed: No
-  such device`) until it settles. Enroll needs 5 captures and every verify is one
-  more, so this must be fixed first. Root cause: we open a fresh session + full
-  42-cmd imaging sequence per capture; HP images continuously in ONE session. Fix:
-  **session reuse** (open once, capture many) and/or capture-level recovery that
-  waits out a re-enumeration and re-opens on the new address instead of failing.
-  (The daemon no longer tight-loops on the error — it backs off `gap.max(3)`s.)
-- End-to-end **live** daemon run: `vfs495 daemon` feeding a real
-  `fprintd-enroll`/`fprintd-verify` with live touches — blocked only by the above;
-  the substance is already proven (a real live capture enrolls all 5 stages and
-  verifies through libfprint, and the ridge gate works live).
+- **Robust finger detection — the current blocker (2026-09-28, session 9).** The
+  fixed ridge-peak threshold is not reliable: the no-finger ridge_peak **drifts**
+  from ~1.2 at a fresh session to ~1.6–1.8 after use, while a finger is ~2.1, so the
+  margin can shrink to ~0.3. Root cause: our calibration is a FIXED replay while
+  HP's is closed-loop/adaptive (`scsSensorFalconCalibrate`), so the no-finger
+  background goes stale and its noise picks up ridge-like structure. Options to
+  evaluate: (a) adaptive/relative baseline at daemon start; (b) a sharper
+  discriminator (tighter ridge-frequency band / orientation coherence / region
+  contrast); (c) real closed-loop calibration (deep RE); (d) require a **swipe** so
+  the segmentation crop_ratio (~0.06–0.3 for a moving finger vs ~1.0 for no finger)
+  becomes a discriminator again alongside ridge. NOTE: `ridge_peak` is window-size
+  dependent — it MUST be computed on the full image; `window_for_feed` clamps only
+  the pixels sent to libfprint, after the gate.
+- End-to-end **live** daemon enroll/verify with touches — blocked on the detector
+  above. The image *substance* is proven (a real live capture enrolls all 5 stages
+  and verifies through libfprint).
 - fprintd systemd drop-in for `FP_VIRTUAL_IMAGE` — a user-opt-in system change.
+
+**Done this session (9):**
+- **Session reuse fixes the re-enumeration.** The daemon opens + handshakes once
+  and reuses the session across captures (rebuilding on a fault); 6 back-to-back
+  no-finger cycles ran with 0 errors and a stable USB address. (`ridge-probe` still
+  opens per-run, so repeated ridge-probes re-enumerate — diagnostic-only.)
+- Fixed the `MAX_FEED_ROWS` clamp that broke the gate (it made `ridge_peak` be
+  computed on the 500-row feed window, inflating no-finger to ~2.5). Gate is on the
+  full image again; `window_for_feed` clamps only the fed pixels.
 - Verify the open unpack is byte-exact for frame-type `07` (payload decodes to
   ridges, so almost certainly yes).
 - Optional: a low-power gate via the unused **EP3 interrupt endpoint** to avoid

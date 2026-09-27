@@ -1229,3 +1229,42 @@ re-enumeration and re-opens on the new address instead of failing the cycle.
 Status: the SUBSTANCE of step 1 is proven (a real live capture enrolls all 5
 stages + verifies through libfprint, session 8). The fully-live 5-touch enroll is
 gated on repeated-capture stability, not on the protocol.
+
+## 2026-09-28 (session 9) — session reuse FIXES re-enumeration; two detector bugs found
+
+### Session reuse (fix for repeated-capture re-enumeration) — WORKS
+Refactored the daemon to open the device + SSL-handshake ONCE and reuse that
+session across captures (capture_frame now takes &mut Sensor + &mut Record); a
+capture fault rebuilds the session (reopen waits out a re-enumeration, else fresh
+open). Validated no-finger: 6 back-to-back capture cycles on one reused session,
+0 errors, 0 rebuilds, USB address stable (no re-enumeration). Committed 9699192.
+(Note: `ridge-probe` still opens a fresh session per run, so repeated ridge-probes
+still re-enumerate — that path is diagnostic-only; the daemon is the stable one.)
+
+### Bug 1: MAX_FEED_ROWS clamp broke the ridge gate (FIXED)
+The 264x7867->500 clamp I added (session 8, inside reconstruct) was computing
+`ridge_peak` on the clamped 500-row window. ridge_peak is WINDOW-SIZE DEPENDENT:
+averaging over 500 rows instead of ~7900 suppresses noise far less, inflating the
+no-finger ridge from ~1.2 to ~2.4-2.6 -> the gate reported FINGER with nothing on
+the sensor (confirmed on a fresh session AND after a full laptop power-off, so it
+was never sensor drift from that). Fix: reconstruct returns the full band again;
+`image::window_for_feed()` clamps to central MAX_FEED_ROWS ONLY for the pixels fed
+to libfprint, AFTER the gate is decided on the full image. RidgeProbe verdict also
+corrected to ridge-only (was still ANDing crop_ratio<=0.6, which the daemon dropped).
+
+### Bug 2 / open problem: no-finger ridge_peak DRIFTS -> fixed threshold is fragile
+Even on the full image (same code as session 7 morning), no-finger ridge_peak is
+now 1.60-1.82, vs 1.21 at session start; a held finger is ~2.1. So the no-finger
+baseline drifts upward with use/temperature and the finger margin can shrink to
+~0.3, which a fixed --min-ridge cannot separate reliably. This is consistent with
+our calibration being a FIXED REPLAY while HP's is closed-loop/adaptive
+(scsSensorFalconCalibrate is data-dependent) -> stale background, residual ridge-
+like structure in no-finger noise. NOT yet solved. Options to evaluate:
+  (a) adaptive/relative baseline: measure current no-finger ridge at daemon start
+      and gate on a delta above it (needs a guaranteed-no-finger moment);
+  (b) a better discriminator (tighter ridge frequency band / orientation coherence
+      / finger-region contrast) that separates real ridges from drifted noise;
+  (c) implement real closed-loop calibration (deep RE) so no-finger stays low;
+  (d) require a SWIPE (not a hold): a swipe yields a segmentable band (crop_ratio
+      low ~0.06-0.3) that no-finger (crop ~1.0) never does, restoring crop_ratio as
+      a discriminator alongside ridge — matches this being a swipe sensor.
