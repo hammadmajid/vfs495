@@ -96,6 +96,13 @@ enum Command {
         /// (finger ~1.8, blank noise ~1.1); paired with the crop-ratio test.
         #[arg(long, default_value_t = 1.4)]
         min_ridge: f32,
+        /// Poll-reply byte-delta above the no-finger baseline that signals a
+        /// finger touch (baseline jitter is ~4; a touch shifts many registers).
+        #[arg(long, default_value_t = 30)]
+        contact_nd: usize,
+        /// Max polls to wait for a finger each cycle before giving up (no imaging).
+        #[arg(long, default_value_t = 20)]
+        max_wait_polls: usize,
         /// Capture a single frame and feed it, then exit (for testing).
         #[arg(long)]
         once: bool,
@@ -177,9 +184,11 @@ fn main() -> Result<()> {
             virtimage::send_image(&sock, &px, w as u32, h as u32)?;
             println!("[+] captured {}x{} and fed virtual_image", w, h);
         }
-        Command::Daemon { socket, min_ridge, once, gap } => {
+        Command::Daemon { socket, min_ridge, contact_nd, max_wait_polls, once, gap } => {
             let sock = resolve_socket(socket)?;
-            run_daemon(&cli.base, &cfg, &sock, min_ridge, once, gap)?;
+            run_daemon(
+                &cli.base, &cfg, &sock, min_ridge, contact_nd, max_wait_polls, once, gap,
+            )?;
         }
     }
     Ok(())
@@ -195,10 +204,19 @@ fn capture_frame(
     cfg: &session::Config,
     dli: &image::DliConfig,
     min_ridge: f32,
+    contact_nd: usize,
+    max_wait_polls: usize,
 ) -> Result<Option<(Vec<u8>, u32, u32)>> {
     let mut dev = usb::Sensor::open()?;
     let mut rec = session::handshake(&dev, cfg)?;
-    let stream = capture::arm_capture(&mut dev, &mut rec, base, cfg)?;
+    // Stage 1: poll the sensor and only fire the imaging latch once a finger is
+    // actually present (WOE-style). Empty cycles return here without imaging.
+    let Some(stream) =
+        capture::capture_on_finger(&mut dev, &mut rec, base, cfg, contact_nd, max_wait_polls)?
+    else {
+        return Ok(None);
+    };
+    // Stage 2: confirm the decoded image really holds ridges before feeding.
     let lines = image::decode_ep2(&stream, 272, dli);
     if lines.rows < 60 {
         return Ok(None);
@@ -232,16 +250,18 @@ fn run_daemon(
     cfg: &session::Config,
     sock: &str,
     min_ridge: f32,
+    contact_nd: usize,
+    max_wait_polls: usize,
     once: bool,
     gap: u64,
 ) -> Result<()> {
     // Suppress the interactive capture prompt; the host UI drives the user.
     std::env::set_var("VFS_NO_PROMPT", "1");
     let dli = image::DliConfig::load_main(base)?;
-    log::info!("vfs495 feeder daemon: socket {sock}, min_ridge {min_ridge}");
+    log::info!("vfs495 feeder daemon: socket {sock}, min_ridge {min_ridge}, contact_nd {contact_nd}");
     log::info!("waiting for finger touches (press and hold when your desktop asks to scan)");
     loop {
-        match capture_frame(base, cfg, &dli, min_ridge) {
+        match capture_frame(base, cfg, &dli, min_ridge, contact_nd, max_wait_polls) {
             Ok(Some((px, w, h))) => match virtimage::send_image(sock, &px, w, h) {
                 Ok(()) => log::info!("fed {w}x{h} image to virtual_image"),
                 Err(e) => log::warn!(

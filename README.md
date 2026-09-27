@@ -143,11 +143,15 @@ fprintd-enroll        # then press & hold when prompted (five stages)
 fprintd-verify
 ```
 
-Finger presence is detected heuristically (the sensor streams high-variance noise
-even with no finger, so the daemon gates on the reconstruct crop ratio plus a
-ridge spectral peak). This is tunable via `--min-ridge` but is the least robust
-part; the durable fix is the `0x02` poll contact signal (`vfs495 poll-probe`),
-not yet wired into the daemon.
+Finger presence is detected in two stages. First, WOE-style: the daemon reaches
+poll-ready, then polls the `0x02` command and watches the reply for a large
+divergence from a no-finger baseline (the reply is near-constant with no finger —
+~10 bytes of jitter — and a touch shifts many AFE registers at once). Only when a
+finger is detected does it fire the imaging latch, so empty cycles never stress
+the sensor. Second, the decoded image must clear a ridge spectral-peak gate before
+it is fed. Tunables: `--contact-nd` (poll divergence threshold, default 30),
+`--max-wait-polls`, and `--min-ridge`. The poll threshold's no-finger margin is
+verified on hardware; confirm/tune the finger side with a live touch.
 
 ---
 
@@ -167,9 +171,10 @@ not yet wired into the daemon.
 - **Unowned sensors only.** Owned sensors need the pairing (`TakeOwnership`) flow
   — fully mapped in `NOTES.md` but not implemented, since it is a persistent,
   cycle-limited sensor write.
-- **Finger detection in the daemon is heuristic** (crop ratio + ridge spectral
-  peak), tuned on a small sample. A weak swipe can be rejected and pathological
-  noise accepted; the robust fix is poll-based contact detection.
+- **Finger detection is two-stage**: a WOE-style poll-divergence gate decides
+  when to image (no-finger baseline verified stable at ~10; contact threshold 30),
+  then a ridge spectral-peak gate validates the decoded image before feeding. Both
+  thresholds are tunable; the finger-side poll magnitude should be confirmed live.
 - **RSA modulus is per-device** and read from `captures/modulus.json`. The sensor
   delivers it in an opaque signed key blob during init (not a plain SSL
   certificate), so generic auto-extraction isn't wired up; on a different unit,

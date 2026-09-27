@@ -496,6 +496,132 @@ pub fn arm_capture(
     Ok(out)
 }
 
+/// Number of leading poll replies used to build the no-finger baseline.
+const BASELINE_POLLS: usize = 3;
+/// Sequence index of the setup-safe poll command (0x02, ~2.4 KB reply, does NOT
+/// fire the big imaging burst) used for WOE-style finger detection.
+const POLL_IDX: usize = 17;
+
+/// Count payload bytes that differ from the baseline by more than a small margin.
+/// A no-finger poll reply is near-constant (this count stays in the low single
+/// digits); a finger shifts many AFE registers at once, so the count jumps.
+fn payload_delta(cur: &[u8], base: &[u8]) -> usize {
+    let n = cur.len().min(base.len());
+    (0..n).filter(|&i| (cur[i] as i32 - base[i] as i32).abs() > 4).count()
+}
+
+/// Process one command's EP2 slice: track the active image key, decrypt the slice
+/// with the chained CBC IV, and append plaintext to `out`. Shared by the imaging
+/// tail of `capture_on_finger`.
+fn process_image_command(
+    dev: &mut Sensor,
+    rec: &mut Record,
+    plain: &[u8],
+    cfg: &crate::session::Config,
+    cur_key: &mut Option<[u8; 32]>,
+    cur_iv: &mut [u8; 16],
+    img: &mut Vec<u8>,
+    out: &mut Vec<u8>,
+) -> bool {
+    if let Some((k, iv)) = parse_security_params(plain) {
+        *cur_key = Some(k);
+        *cur_iv = iv;
+    }
+    let before = img.len();
+    if send_cmd_draining(dev, rec, plain, Some(cfg), Some(img)).is_none() {
+        return false;
+    }
+    drain_image_bounded(dev, img, 3, EP2_BURST_MS);
+    let slice = &img[before..];
+    if !slice.is_empty() {
+        if let Some(k) = *cur_key {
+            let pt = crate::crypto::decrypt_image_stream(&k, cur_iv, slice);
+            if slice.len() >= 16 {
+                cur_iv.copy_from_slice(&slice[slice.len() - 16..]);
+            }
+            out.extend_from_slice(&pt);
+        }
+    }
+    true
+}
+
+/// WOE-style capture: reach poll-ready, then poll the sensor until a finger is
+/// detected (the poll reply diverges from a no-finger baseline by more than
+/// `contact_nd` bytes), and only then fire the imaging tail. Returns the decrypted
+/// image stream on a touch, or `Ok(None)` if no finger arrives within
+/// `max_wait_polls` polls (the imaging latch is never fired in that case, so the
+/// sensor is not stressed on empty cycles). This mirrors HP's
+/// `idsSensorWOEFingerprintPoll`: poll, watch for the contact event, then image.
+pub fn capture_on_finger(
+    dev: &mut Sensor,
+    rec: &mut Record,
+    base: &Path,
+    cfg: &crate::session::Config,
+    contact_nd: usize,
+    max_wait_polls: usize,
+) -> Result<Option<Vec<u8>>> {
+    let seq = load_sequence(base)?;
+    anyhow::ensure!(seq.len() > POLL_IDX + 1, "capture sequence too short");
+    let mut junk = Vec::new();
+
+    // 1. Reach poll-ready: replay setup/calibration up to (not including) the poll.
+    for plain in seq.iter().take(POLL_IDX) {
+        if send_cmd(dev, rec, plain, Some(cfg)).is_none() {
+            anyhow::bail!("setup command 0x{:02x} failed", plain[0]);
+        }
+        drain_image_bounded(dev, &mut junk, 2, 1500);
+        junk.clear();
+    }
+
+    // 2. Poll for a finger: send the poll repeatedly, build a no-finger baseline
+    //    from the first few replies, then watch for a large payload divergence.
+    let poll = seq[POLL_IDX].clone();
+    let mut baseline: Vec<u8> = Vec::new();
+    let mut detected = false;
+    for n in 0..max_wait_polls {
+        let Some((payload, status)) = send_cmd(dev, rec, &poll, Some(cfg)) else {
+            log::warn!("poll {n} write failed");
+            continue;
+        };
+        drain_image_bounded(dev, &mut junk, 2, 800);
+        junk.clear();
+        if !status_is_ok(status) || payload.is_empty() {
+            continue;
+        }
+        if n < BASELINE_POLLS {
+            if payload.len() > baseline.len() {
+                baseline = payload.clone();
+            }
+            continue;
+        }
+        let nd = payload_delta(&payload, &baseline);
+        log::debug!("poll {n}: payload {}B delta {nd} (contact if > {contact_nd})", payload.len());
+        if nd > contact_nd {
+            log::info!("finger detected on poll {n} (payload delta {nd} > {contact_nd})");
+            detected = true;
+            break;
+        }
+    }
+    if !detected {
+        return Ok(None);
+    }
+
+    // 3. Finger present: fire the imaging tail and decrypt the EP2 burst.
+    let mut img = Vec::new();
+    let mut out = Vec::new();
+    let mut cur_key: Option<[u8; 32]> = None;
+    let mut cur_iv = [0u8; 16];
+    for plain in seq.iter().skip(POLL_IDX + 1) {
+        if !process_image_command(dev, rec, plain, cfg, &mut cur_key, &mut cur_iv, &mut img, &mut out)
+        {
+            log::warn!("imaging command 0x{:02x} failed; stopping", plain[0]);
+            break;
+        }
+    }
+    log::info!("imaging tail: {} raw EP2 bytes, {} decrypted image bytes", img.len(), out.len());
+    Ok(Some(out))
+}
+
 /// Read the plaintext image stream from EP2 until it stays quiet for `quiet_ms`
 /// (after some data has arrived) or `max_ms` elapses. Returns the raw bytes.
 pub fn read_ep2_stream(dev: &Sensor, quiet_ms: u64, max_ms: u64) -> Vec<u8> {

@@ -1043,3 +1043,38 @@ project has not applied it — documented in README for the user to opt into).
 - main.rs: `Command::Daemon` + `capture_frame` (crop-ratio + ridge_peak gate) + `run_daemon` loop.
 - README: daemon usage + GNOME/fprintd systemd drop-in wiring + finger-detection caveat.
 - 6 unit tests pass; clippy clean.
+
+---
+
+## 2026-09-28 (session 6b) — poll-based finger detection wired into the daemon (WOE-style)
+
+Added `capture::capture_on_finger` and switched the daemon's `capture_frame` to a two-stage gate, so
+empty cycles no longer fire the imaging latch.
+
+### Mechanism
+Reverse-engineered `idsSensorWOEFingerprintPoll@0x456320`: it repeatedly sends the poll via
+`scsSensorSendCommand` and dispatches a finger event (`idsSensorEventPerformCallback`) — the detection is
+a poll-then-watch loop, not a single reply field. So `capture_on_finger` mirrors that:
+1. Replay setup seq[0..17] to reach poll-ready.
+2. Poll seq[17] (0x02, ~2.4 KB reply, does NOT fire the big burst); build a no-finger baseline from the
+   first 3 replies; then flag a finger when `payload_delta` (# bytes differing >4 from baseline) exceeds
+   `contact_nd`. Give up after `max_wait_polls` (returns None, imaging never fired).
+3. On a touch, replay the imaging tail seq[18..] with the AES-256-CBC EP2 decrypt.
+
+### Verified on hardware (no finger)
+Poll-ready reached, 12 polls, payload delta steady at **9-10** (< threshold 30) -> "no finger this
+cycle; skipping", NO imaging tail, clean exit. Confirms the empty-cycle path is now cheap and never
+stresses the imaging latch. (Earlier `poll-probe` also showed the no-finger reply is near-constant:
+nd 0-4 at delta>4.) The finger-side magnitude (delta with a real touch) should be confirmed live to tune
+`--contact-nd`; a touch shifts many AFE registers so it is expected well above 30.
+
+### Changes (committed)
+- capture.rs: `capture_on_finger` (WOE poll-wait -> imaging), `payload_delta`, `process_image_command`
+  (shared key-tracking + EP2 decrypt helper), consts POLL_IDX=17 / BASELINE_POLLS=3.
+- main.rs: `capture_frame` now calls `capture_on_finger` first (stage 1), then the ridge gate (stage 2);
+  daemon flags `--contact-nd` (30), `--max-wait-polls` (20).
+- README: two-stage detection documented. 6 unit tests pass; clippy clean.
+
+### Follow-ups
+- Confirm finger-side poll delta live and tune `--contact-nd`.
+- fprintd systemd drop-in (FP_VIRTUAL_IMAGE) still a user-opt-in system-config change (README).
