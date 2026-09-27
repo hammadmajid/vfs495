@@ -3,7 +3,7 @@
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
-use vfs495::{capture, image, session, usb, virtimage};
+use vfs495::{capture, crypto, image, session, usb, virtimage};
 
 #[derive(Parser)]
 #[command(name = "vfs495", version, about = "Open userspace driver for the Validity VFS495 (138a:003f)")]
@@ -240,25 +240,27 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Capture one frame from the sensor and decode it to a reconstructed image.
-/// Returns `Ok(None)` when the capture holds no finger (too few decoded lines),
-/// so the daemon can skip idle cycles without treating them as errors. Each call
-/// opens a fresh session, which is the proven single-shot path; re-using a
-/// session across captures is not yet validated.
+/// Capture one frame from the sensor and decode it to a reconstructed image,
+/// reusing an already-open device and SSL session. Returns `Ok(None)` when the
+/// capture holds no finger (too few decoded lines / low ridge), so the daemon can
+/// skip idle cycles without treating them as errors. A USB/session error is
+/// returned as `Err` for the caller to recover from (re-open + re-handshake) —
+/// reusing one session across captures avoids the per-capture open/handshake churn
+/// that was re-enumerating the sensor.
 fn capture_frame(
+    dev: &mut usb::Sensor,
+    rec: &mut crypto::Record,
     base: &std::path::Path,
     cfg: &session::Config,
     dli: &image::DliConfig,
     min_ridge: f32,
 ) -> Result<Option<(Vec<u8>, u32, u32)>> {
-    let mut dev = usb::Sensor::open()?;
-    let mut rec = session::handshake(&dev, cfg)?;
     // Fire the full imaging capture. The WOE poll gate (poll seq[17] and watch for
     // reply divergence) was falsified on hardware — that poll is finger-blind, so
     // there is no pre-latch signal to gate on (see docs/STATUS.md §7). We instead
     // image every cycle and decide from the picture; firing the latch per cycle is
     // safe (the "latch stresses the sensor" premise was falsified in session 4).
-    let stream = capture::arm_capture(&mut dev, &mut rec, base, cfg)?;
+    let stream = capture::arm_capture(dev, rec, base, cfg)?;
     let lines = image::decode_ep2(&stream, 272, dli);
     if lines.rows < 60 {
         log::debug!("skip: no finger (only {} decoded lines)", lines.rows);
@@ -280,9 +282,22 @@ fn capture_frame(
     Ok(Some((px, w as u32, h as u32)))
 }
 
+/// (Re)establish a live session: recover the device (waiting out any USB
+/// re-enumeration, falling back to a fresh open) and run the SSL handshake.
+fn reestablish(dev: &mut usb::Sensor, cfg: &session::Config) -> Result<crypto::Record> {
+    if dev.reopen().is_err() {
+        // The handle could not be recovered in place (e.g. the device fully went
+        // away); open the current device from scratch.
+        *dev = usb::Sensor::open()?;
+    }
+    session::handshake(dev, cfg)
+}
+
 /// Feeder loop: capture on each finger touch and push the image to libfprint's
-/// virtual_image socket. Errors on one cycle (a transient USB or socket failure)
-/// are logged and the loop continues, so the daemon survives fprintd restarts.
+/// virtual_image socket. The device is opened and the SSL session established
+/// ONCE and reused across captures (per-capture open/handshake churn was
+/// re-enumerating the sensor). A capture error rebuilds the session and continues,
+/// so the daemon survives a re-enumeration or an fprintd restart.
 fn run_daemon(
     base: &std::path::Path,
     cfg: &session::Config,
@@ -296,8 +311,11 @@ fn run_daemon(
     let dli = image::DliConfig::load_main(base)?;
     log::info!("vfs495 feeder daemon: socket {sock}, min_ridge {min_ridge}");
     log::info!("waiting for finger touches (press and hold when your desktop asks to scan)");
+
+    let mut dev = usb::Sensor::open()?;
+    let mut rec = session::handshake(&dev, cfg)?;
     loop {
-        match capture_frame(base, cfg, &dli, min_ridge) {
+        match capture_frame(&mut dev, &mut rec, base, cfg, &dli, min_ridge) {
             Ok(Some((px, w, h))) => match virtimage::send_image(sock, &px, w, h) {
                 Ok(()) => log::info!("fed {w}x{h} image to virtual_image"),
                 Err(e) => log::warn!(
@@ -306,12 +324,19 @@ fn run_daemon(
             },
             Ok(None) => log::debug!("no finger this cycle; skipping"),
             Err(e) => {
-                // A failed cycle (e.g. the sensor briefly dropped off the bus)
-                // must not turn into a tight spin — back off before retrying so a
-                // persistent fault logs at a readable rate instead of thousands of
-                // lines per second. This also lets USB re-enumeration settle.
-                log::warn!("capture cycle failed: {e}");
+                // The session/device faulted (e.g. the sensor dropped off the bus).
+                // Rebuild it rather than tight-looping: back off (also lets a USB
+                // re-enumeration settle), then re-open + re-handshake. On persistent
+                // failure keep retrying at a readable rate instead of spinning.
+                log::warn!("capture cycle failed: {e}; rebuilding session");
                 std::thread::sleep(std::time::Duration::from_secs(gap.max(3)));
+                match reestablish(&mut dev, cfg) {
+                    Ok(new_rec) => {
+                        rec = new_rec;
+                        log::info!("session re-established");
+                    }
+                    Err(e2) => log::warn!("session rebuild failed: {e2}; will retry"),
+                }
                 continue;
             }
         }
