@@ -275,13 +275,20 @@ libfprint-acceptable, minutiae-friendly image. (A swipe assembles to a few-hundr
 -line band and is unaffected; the clamp only bites the held-finger case.)
 
 **Remaining:**
+- **Repeated-capture stability — the current blocker for live enroll (2026-09-28).**
+  A single capture/handshake is rock-solid, but repeated back-to-back full captures
+  make the sensor drop off USB and re-enumerate (address walked 005→011 across one
+  failed run), after which every capture fails instantly (`EP_OUT write failed: No
+  such device`) until it settles. Enroll needs 5 captures and every verify is one
+  more, so this must be fixed first. Root cause: we open a fresh session + full
+  42-cmd imaging sequence per capture; HP images continuously in ONE session. Fix:
+  **session reuse** (open once, capture many) and/or capture-level recovery that
+  waits out a re-enumeration and re-opens on the new address instead of failing.
+  (The daemon no longer tight-loops on the error — it backs off `gap.max(3)`s.)
 - End-to-end **live** daemon run: `vfs495 daemon` feeding a real
-  `fprintd-enroll`/`fprintd-verify` (or a direct-libfprint enroll harness) with live
-  finger touches — every piece is proven in isolation (ridge gate live; clamped
-  image enrolls/verifies), but the full live daemon → socket → enroll loop with
-  touches has not been run start to finish yet.
-- Repeated-capture reliability: each capture opens a fresh session (the proven
-  single-shot path); re-using a session across captures is not yet validated.
+  `fprintd-enroll`/`fprintd-verify` with live touches — blocked only by the above;
+  the substance is already proven (a real live capture enrolls all 5 stages and
+  verifies through libfprint, and the ridge gate works live).
 - fprintd systemd drop-in for `FP_VIRTUAL_IMAGE` — a user-opt-in system change.
 - Verify the open unpack is byte-exact for frame-type `07` (payload decodes to
   ridges, so almost certainly yes).

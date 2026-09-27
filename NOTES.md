@@ -1203,3 +1203,29 @@ Net: image path is PROVEN end-to-end for a real sensor capture (enroll+match+rej
 through real libfprint). Still to do live: run the actual `vfs495 daemon` feeding a
 live enroll with finger touches (5 for enroll + 1 verify); then the fprintd systemd
 drop-in. Committed this session.
+
+### Live daemon enroll attempt — BLOCKED by repeated-capture USB re-enumeration
+Wrote an interactive harness (scratchpad/live_enroll.py) that opens libfprint
+virtual_image directly (no fprintd/PAM change), spawns one `vfs495 run` capture per
+enroll stage with loud PRESS/HOLD/LIFT cues, and feeds each decoded image to the
+socket. Findings from live attempts:
+- Single capture / handshake: RELIABLE (confirmed again this session).
+- Repeated back-to-back full captures: the sensor DROPS OFF USB and re-enumerates
+  (address walked 005 -> 011 across one failed run); once it is mid-re-enumeration,
+  every `vfs495 run` fails instantly with `EP_OUT write failed: No such device`,
+  producing a cascade. The daemon's old tight retry loop turned this into thousands
+  of lines/sec (fixed: back off gap.max(3)s on error, commit 41e05fa).
+- A transient `open_sync` "Address already in use" also appeared: a race with a
+  just-Ctrl-C'd prior harness still releasing its virtual_image socket. Mitigated
+  by a unique per-PID socket + atexit unlink; in isolation open_sync works fine.
+
+Root cause: we open a FRESH session + full 42-cmd imaging sequence per capture.
+Doing that repeatedly (enroll = 5, plus every verify) churns USB re-init and
+re-enumerates the sensor. HP images continuously in ONE session. So the fix is
+repeated-capture resilience — most likely SESSION REUSE (open once, capture many),
+the previously-deferred item, and/or capture-level recovery that waits out a
+re-enumeration and re-opens on the new address instead of failing the cycle.
+
+Status: the SUBSTANCE of step 1 is proven (a real live capture enrolls all 5
+stages + verifies through libfprint, session 8). The fully-live 5-touch enroll is
+gated on repeated-capture stability, not on the protocol.
