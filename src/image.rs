@@ -411,13 +411,27 @@ pub fn ridge_peak(px: &[u8], w: usize, h: usize) -> f32 {
     peak / (sum / cnt)
 }
 
+/// Maximum rows in a reconstructed finger image. A swipe assembles into a band a
+/// few hundred lines tall; a *held* finger instead stacks the same region into
+/// thousands of near-identical lines, and libfprint's image drivers reject an
+/// over-tall image ("unrealistically large image") before any minutiae are read.
+/// Cap the output to a normal finger height — also what the minutiae extractor
+/// expects — by taking the central window when the band is longer.
+const MAX_FEED_ROWS: usize = 500;
+
 pub fn reconstruct(lines: &Lines, crop: bool) -> (Vec<u8>, usize, usize) {
     let seg = if crop { finger_segment(lines) } else { (0, lines.rows) };
     // Keep the detected finger band as long as it is a usable strip (>= 20 lines).
     // Captures are mostly baseline (no-finger) lines, so the band is often a small
     // fraction of the total; only fall back to the full frame if detection failed.
     let usable = seg.1 > seg.0 && (seg.1 - seg.0) >= 20;
-    let (a, b) = if usable { seg } else { (0, lines.rows) };
+    let (mut a, mut b) = if usable { seg } else { (0, lines.rows) };
+    // Clamp an over-tall band to a central finger-sized window (see MAX_FEED_ROWS).
+    if crop && b - a > MAX_FEED_ROWS {
+        let mid = (a + b) / 2;
+        a = mid - MAX_FEED_ROWS / 2;
+        b = a + MAX_FEED_ROWS;
+    }
     let cropped = Lines {
         data: lines.data[a * lines.cols..b * lines.cols].to_vec(),
         rows: b - a,

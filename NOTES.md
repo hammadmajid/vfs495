@@ -1172,3 +1172,34 @@ Not yet done: run the daemon end-to-end into fprintd (enroll/verify) with a live
 finger; validate feed quality across enroll stages; session reuse across captures.
 Everything above (poll-probe default fix + ridge-probe + daemon rebuild) NOT yet
 committed.
+
+## 2026-09-28 (session 8) — libfprint enroll/verify with LIVE sensor image; image-size fix
+
+Step 1 of system integration: run the daemon path end-to-end into libfprint
+enroll/verify. Drove libfprint directly via GObject introspection (no fprintd/PAM/
+system change), feeding images over the virtual_image socket exactly as the daemon
+does. Parametrized `vimage_proof.py` into a scratchpad probe that enrolls a given
+PGM, verifies it against itself (expect match) and against a synthetic different
+print (expect reject).
+
+Findings:
+- Baseline `captures/fingerprint_open.pgm` (200x400, an earlier swipe): PASS
+  (enroll 5 stages, match self, reject different). libfprint stack works here.
+- Our fresh LIVE held-finger capture `captures/ridge_finger.pgm` (264x7867):
+  REJECTED by libfprint before any minutiae read — "Image header suggests an
+  unrealistically large image, disconnecting client." A held finger stacks the same
+  region into ~7867 near-identical lines (the finger-segment crop keeps them all,
+  crop_ratio ~1.0), producing an over-tall strip libfprint won't accept.
+- A normal finger-sized WINDOW of that same real capture PASSES: central 264x400
+  AND central 264x500 both enroll all 5 stages, match self, reject different. So the
+  live image contains genuine usable minutiae; the only problem was geometry/size.
+
+Fix: `image::reconstruct` now clamps the finger band to a central `MAX_FEED_ROWS`
+(=500) window when it is taller. A swipe (few-hundred-line band) is unaffected; the
+clamp only bites the held-finger redundant-stack case. Re-tested: the 264x500 clamp
+window enrolls/verifies (PASS). Build + 6 unit tests pass.
+
+Net: image path is PROVEN end-to-end for a real sensor capture (enroll+match+reject
+through real libfprint). Still to do live: run the actual `vfs495 daemon` feeding a
+live enroll with finger touches (5 for enroll + 1 verify); then the fprintd systemd
+drop-in. Committed this session.

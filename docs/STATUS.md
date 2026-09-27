@@ -259,16 +259,29 @@ daemon — see the README "GNOME / fprintd integration" section.
 - **Finger detection: ridge-peak gate, live-confirmed** (finger 2.10 vs no-finger
   1.21, threshold 1.4). Daemon rebuilt on it; the finger-blind WOE poll gate and
   the misleading crop-ratio condition were removed. See §7.
+- **Our live capture enrolls and verifies through libfprint** (2026-09-28): a real
+  live-path image (ridge_peak 2.10) enrolls all 5 stages, matches itself, and
+  rejects a different print, driving libfprint directly via GObject introspection
+  (same path as `vimage_proof.py`, no fprintd/PAM change). So the sensor's image
+  contains genuine, usable minutiae.
+
+**Image-size fix (2026-09-28):** libfprint rejects an over-tall image
+("unrealistically large image, disconnecting client") *before* reading minutiae. A
+**held** finger stacks the same region into a huge redundant strip (264×7867 in the
+test) and was rejected outright; a normal finger-sized window of the same capture
+enrolls/verifies fine (264×400 and 264×500 both PASS). `reconstruct` now clamps the
+finger band to a central `MAX_FEED_ROWS` (500) window, so the daemon always feeds a
+libfprint-acceptable, minutiae-friendly image. (A swipe assembles to a few-hundred
+-line band and is unaffected; the clamp only bites the held-finger case.)
 
 **Remaining:**
-- End-to-end daemon run: `vfs495 daemon --once` (or with a socket) driving a real
-  `fprintd-enroll`/`fprintd-verify` — the gate is validated in isolation via
-  `ridge-probe`, but the full daemon → socket → fprintd loop with a live finger has
-  not been exercised yet.
+- End-to-end **live** daemon run: `vfs495 daemon` feeding a real
+  `fprintd-enroll`/`fprintd-verify` (or a direct-libfprint enroll harness) with live
+  finger touches — every piece is proven in isolation (ridge gate live; clamped
+  image enrolls/verifies), but the full live daemon → socket → enroll loop with
+  touches has not been run start to finish yet.
 - Repeated-capture reliability: each capture opens a fresh session (the proven
   single-shot path); re-using a session across captures is not yet validated.
-- Enroll may need several good frames; a held-finger capture is a tall full-height
-  image (crop does not isolate a band). Feed quality across enroll stages unproven.
 - fprintd systemd drop-in for `FP_VIRTUAL_IMAGE` — a user-opt-in system change.
 - Verify the open unpack is byte-exact for frame-type `07` (payload decodes to
   ridges, so almost certainly yes).
