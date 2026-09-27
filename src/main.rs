@@ -305,7 +305,15 @@ fn run_daemon(
                 ),
             },
             Ok(None) => log::debug!("no finger this cycle; skipping"),
-            Err(e) => log::warn!("capture cycle failed: {e}"),
+            Err(e) => {
+                // A failed cycle (e.g. the sensor briefly dropped off the bus)
+                // must not turn into a tight spin — back off before retrying so a
+                // persistent fault logs at a readable rate instead of thousands of
+                // lines per second. This also lets USB re-enumeration settle.
+                log::warn!("capture cycle failed: {e}");
+                std::thread::sleep(std::time::Duration::from_secs(gap.max(3)));
+                continue;
+            }
         }
         if once {
             break;
