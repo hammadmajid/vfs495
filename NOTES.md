@@ -987,3 +987,18 @@ live: `sudo ./target/release/vfs495 capture --out /tmp/swipe.bin` then `vfs495 d
   frames too (payload decodes to ridges, so likely yes; verify against a fresh gdb pair if paranoid).
 - Sign key (value[0x40..0x60]) + `_scsSensorFpSignUpdate` = an HMAC/signature over the image for
   integrity; not needed to obtain pixels, ignored for now.
+
+---
+
+## 2026-09-27 (session 5b) — LIVE-CONFIRMED on hardware: fully-open capture->image works end to end
+
+Ran the wired path on the real sensor (press-and-hold):
+`sudo ./target/release/vfs495 capture --out /tmp/swipe.bin` then
+`./target/release/vfs495 decode --input /tmp/swipe.bin --out /tmp/swipe.pgm`.
+
+Result: capture emitted the DECRYPTED stream, decode unpacked **7906 lines x 264 cols** and reconstructed
+a **264 x 623** finger band — a real fingerprint (per-line/global sd ~57, dominant ridge column-period
+~10.6 px). No "too few lines", no HP code, no gdb harvest. This confirms the AES-256-CBC EP2 decrypt
+(key/IV recovered from the replayed command's SecurityParams TLV) works live, closing the session-4b
+blocker. The open driver is now complete end to end: session -> transport -> capture -> EP2 decrypt ->
+demux -> unpack/reconstruct, all in open Rust.
