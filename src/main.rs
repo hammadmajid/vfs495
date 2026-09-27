@@ -106,11 +106,9 @@ fn main() -> Result<()> {
         Command::Capture { out } => {
             let mut dev = usb::Sensor::open()?;
             let mut rec = session::handshake(&dev, &cfg)?;
-            let mut stream = capture::arm_capture(&mut dev, &mut rec, &cli.base, &cfg)?;
-            eprintln!(">> swipe your finger now");
-            stream.extend(capture::read_ep2_stream(&dev, 1200, 15000));
+            let stream = capture::arm_capture(&mut dev, &mut rec, &cli.base, &cfg)?;
             std::fs::write(&out, &stream)?;
-            println!("[+] wrote {} ({} bytes)", out.display(), stream.len());
+            println!("[+] wrote {} decrypted image bytes to {}", stream.len(), out.display());
         }
         Command::PollProbe { prefix, poll_idx, iters } => {
             let mut dev = usb::Sensor::open()?;
@@ -151,9 +149,7 @@ fn main() -> Result<()> {
             let sock = resolve_socket(socket)?;
             let mut dev = usb::Sensor::open()?;
             let mut rec = session::handshake(&dev, &cfg)?;
-            let mut stream = capture::arm_capture(&mut dev, &mut rec, &cli.base, &cfg)?;
-            eprintln!(">> swipe your finger now");
-            stream.extend(capture::read_ep2_stream(&dev, 1200, 15000));
+            let stream = capture::arm_capture(&mut dev, &mut rec, &cli.base, &cfg)?;
             let cfg = image::DliConfig::load_main(&cli.base)?;
             let lines = image::decode_ep2(&stream, 272, &cfg);
             if lines.rows < 20 {

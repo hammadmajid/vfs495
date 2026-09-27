@@ -72,6 +72,31 @@ fn drain_image_bounded(dev: &Sensor, img: &mut Vec<u8>, quiet_reads: usize, max_
     }
 }
 
+/// Extract the AES-256 image key and IV from a GetFingerprint command's
+/// SecurityParams TLV, if present.
+///
+/// HP builds the params in `scsGetSecurityParams`: a TLV with tag `0x0006` and
+/// length `0x6a`, whose value holds the 32-byte AES-256 key at offset 0, the IV
+/// at offset 0x20 (16 bytes used), a sign key at 0x40, and the cipher selector
+/// `0x04` (AES-256) at 0x68 — all in the clear. The sensor encrypts the EP2
+/// imaging burst under this key/IV; because we replay HP's exact command bytes,
+/// the sensor uses HP's key, which we read straight back out here.
+fn parse_security_params(plain: &[u8]) -> Option<([u8; 32], [u8; 16])> {
+    // TLV header: tag 0x0006 (LE) + length 0x006a (LE) = 06 00 6a 00.
+    let hdr = [0x06u8, 0x00, 0x6a, 0x00];
+    let pos = plain.windows(4).position(|w| w == hdr)?;
+    let v = plain.get(pos + 4..pos + 4 + 0x6a)?;
+    // Only AES-256 (cipher byte 0x04) is handled; the key must be 32 bytes.
+    if v.get(0x68) != Some(&0x04) {
+        return None;
+    }
+    let mut key = [0u8; 32];
+    let mut iv = [0u8; 16];
+    key.copy_from_slice(&v[0..32]);
+    iv.copy_from_slice(&v[0x20..0x30]);
+    Some((key, iv))
+}
+
 /// Decode the sensor status word from a decrypted in-session reply.
 ///
 /// Ground truth from live decryption: a reply plaintext is `[0..2]=u16 status
@@ -378,7 +403,16 @@ pub fn arm_capture(
     cfg: &crate::session::Config,
 ) -> Result<Vec<u8>> {
     let seq = load_sequence(base)?;
-    let mut img = Vec::new();
+    let mut img = Vec::new();       // raw EP2 bytes (encrypted; kept for stats/logging)
+    let mut out = Vec::new();       // decrypted image line stream (01fe frames)
+    // The EP2 imaging burst is AES-256-CBC encrypted; the key/IV travel in each
+    // GetFingerprint command's SecurityParams TLV (see `parse_security_params`).
+    // Each such command resets the key and initial IV; the IV then chains across
+    // EP2 reads (last ciphertext block -> next IV), exactly as HP's
+    // `scsSensorDecryptFingerprint` does. EP2 reads are 16-byte aligned, so a
+    // per-command slice is always a whole number of AES blocks.
+    let mut cur_key: Option<[u8; 32]> = None;
+    let mut cur_iv = [0u8; 16];
     // Calibration (seq 0..~15) must run with NO finger. Cue a finger at the
     // poll/imaging boundary (override with VFS_SWIPE_AT; set huge to disable).
     let swipe_at: usize =
@@ -397,6 +431,11 @@ pub fn arm_capture(
             std::thread::sleep(std::time::Duration::from_millis(1200));
         }
         let cmd_op = plain[0];
+        if let Some((k, iv)) = parse_security_params(plain) {
+            cur_key = Some(k);
+            cur_iv = iv;
+            log::info!("[{i:3}] cmd=0x{cmd_op:02x} carries SecurityParams (AES-256 image key/IV)");
+        }
         // send_cmd handles the imaging-latch re-enumeration: reopen the handle and
         // re-handshake a fresh session (the reset drops the old one), then resend.
         // Experiment: VFS_NO_REHANDSHAKE reopens but does NOT re-handshake, to test
@@ -428,13 +467,28 @@ pub fn arm_capture(
         // imaging latch before sending the next command; with no finger the sensor
         // streams baseline frames indefinitely, so the time bound is what ends it.
         drain_image_bounded(dev, &mut img, 3, EP2_BURST_MS);
-        let (mean, sd) = mean_sd(&img[before..]);
-        if img.len() > before {
-            log::info!("[{i:3}]   EP2 +{}B mean={mean:.1} sd={sd:.1}", img.len() - before);
+        let slice = &img[before..];
+        let (mean, sd) = mean_sd(slice);
+        if !slice.is_empty() {
+            log::info!("[{i:3}]   EP2 +{}B mean={mean:.1} sd={sd:.1}", slice.len());
+            // Decrypt this command's EP2 slice under the active image key, chaining
+            // the CBC IV forward for the next slice (matches HP's per-read decrypt).
+            if let Some(k) = cur_key {
+                let pt = crate::crypto::decrypt_image_stream(&k, &cur_iv, slice);
+                if slice.len() >= 16 {
+                    cur_iv.copy_from_slice(&slice[slice.len() - 16..]);
+                }
+                out.extend_from_slice(&pt);
+            }
         }
     }
-    log::info!("capture replayed ({} commands, {} image bytes)", seq.len(), img.len());
-    Ok(img)
+    log::info!(
+        "capture replayed ({} commands, {} raw EP2 bytes, {} decrypted image bytes)",
+        seq.len(),
+        img.len(),
+        out.len()
+    );
+    Ok(out)
 }
 
 /// Read the plaintext image stream from EP2 until it stays quiet for `quiet_ms`

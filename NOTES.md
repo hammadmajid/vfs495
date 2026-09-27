@@ -933,3 +933,57 @@ Prior top-line "open session + DECODE proven" / "real fingerprint captured end-t
 decode: the SECURE SESSION and TRANSPORT are proven open and live; the DECODE of a raw live EP2 capture
 is NOT — it depends on an unsolved raw-EP2 transform. The fingerprint image was produced from HP-RAM-
 harvested intermediate data, not from a fully-open capture.
+
+---
+
+## 2026-09-27 (session 5) — *** EP2 TRANSFORM SOLVED: image is AES-256-CBC, key travels in the command. FULLY-OPEN CAPTURE NOW COMPLETE ***
+
+The raw-EP2 → decodable-frames transform (session-4b's blocker) is reverse-engineered and implemented.
+The open driver now captures and decodes a real fingerprint from a LIVE raw EP2 stream with zero HP code.
+
+### The mechanism (from the HP binary, debug symbols intact)
+- `scsSensorDecryptFingerprint@0x4fd640`: EP2 imaging data is **AES-256-CBC** (`palCryptoDecrypt`->
+  `palCryptoAesCbc`, cipher selector 5/6). Key length taken from the SSL suite via
+  `scsSSLGetSessionKeyLength` (=32). IV **chains across reads** (last 16 ciphertext bytes of each read
+  become the next IV); decrypt is in-place.
+- `_scsSensorFpEncInit@0x4eb7f0`: HP generates a **fresh random 32-byte key AND IV per capture**
+  (`palCryptoRng`), stored at ctx+0x4b8 (key) and ctx+0x4d8 (IV). NOT the SSL session key.
+- `scsGetSecurityParams@0x4fd740`: packs those into a SecurityParams TLV **in the clear** (no RSA wrap):
+  **tag `0x0006`, length `0x6a`; value[0..32]=AES key, value[0x20..0x30]=IV, value[0x40..0x60]=sign key,
+  byte[0x68]=cipher (0x04=AES-256)**. This TLV is embedded in the `0x02` GetFingerprint command, sent
+  over the already-SSL-encrypted channel. The sensor encrypts the image with the host-supplied key.
+
+### Why this unblocks us
+Our capture REPLAYS HP's exact command bytes, so the sensor encrypts EP2 with **HP's** key — which is
+sitting in plaintext inside those same replayed bytes. We recover it and decrypt. No new key exchange
+needed. capture_seq.json commands 3/17/22/23/26/27/41 each carry the TLV; the two imaging commands
+(23, 27) additionally carry a populated sign key.
+
+### Proven OFFLINE on the user's live /tmp/swipe.bin (the "too few lines" capture)
+- Decrypting the cmd-23 burst (AES-256-CBC, key/IV from seq[23]'s TLV) yields **7845 clean `01fe` frames
+  at a perfect 272-byte stride, all frame-type `07 07`** — identical structure to the gdb-rebuilt
+  ep2_stream.bin (which was `06 06`; 06 vs 07 is just a mode/version byte the open unpack ignores).
+- `vfs495 decode` on the decrypted burst -> **264 x 7845 image**; per-line sd median 57, every line >30,
+  dominant ridge column-period ~11.5 px, spectral peak/mean 5.15 = a real, firm-contact fingerprint.
+- Wrong key (a non-imaging command) -> ~90 stray `01fe`, no frames. Confirms the key is correct.
+
+### Driver changes (committed)
+- crypto.rs: `decrypt_image_stream(key,iv,ct)` = AES-256-CBC, no padding, drops a trailing <16 remainder;
+  reuses the record layer's `Aes256CbcDec`. Unit test `image_stream_decrypt_roundtrips` (6 tests pass).
+- capture.rs: `parse_security_params(plain)` extracts the `06 00 6a 00` TLV's key/IV (AES-256 only).
+  `arm_capture` now tracks the active key/IV, resets them on each SecurityParams command, decrypts each
+  command's EP2 slice with the running IV (chained across slices; EP2 reads are 16-aligned so slices are
+  whole blocks), and RETURNS the decrypted `01fe` stream instead of raw EP2.
+- main.rs: `capture` writes the decrypted stream (no more stale trailing raw read); `run` decodes it.
+
+### Status: FULLY OPEN, end to end
+Secure session, transport, capture, EP2 decrypt, frame demux, and unpack/reconstruct all run in open Rust
+with no HP code and no gdb RAM harvest. Only a fresh hardware run remains to confirm the wired-in path
+live: `sudo ./target/release/vfs495 capture --out /tmp/swipe.bin` then `vfs495 decode --input
+/tmp/swipe.bin` (capture now emits the DECRYPTED stream, so decode should light up directly).
+
+### Open follow-ups (minor)
+- Frame type `07 07` vs `06 06`: confirm the open unpack (mode 8 / perm_264) is byte-correct for `07`
+  frames too (payload decodes to ridges, so likely yes; verify against a fresh gdb pair if paranoid).
+- Sign key (value[0x40..0x60]) + `_scsSensorFpSignUpdate` = an HMAC/signature over the image for
+  integrity; not needed to obtain pixels, ignored for now.

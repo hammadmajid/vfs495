@@ -240,6 +240,34 @@ impl Record {
     }
 }
 
+/// AES-256-CBC-decrypt the encrypted fingerprint image stream from EP2.
+///
+/// The sensor encrypts the imaging burst with a per-capture AES-256 key and IV
+/// that the host generates (`palCryptoRng` in HP's `_scsSensorFpEncInit`) and
+/// sends to the sensor *in the clear* inside the GetFingerprint command's
+/// SecurityParams TLV (tag `0x0006`: value[0..32] = key, value[0x20..0x30] = IV,
+/// cipher byte `0x04` = AES-256). HP decrypts the stream in `scsSensorDecryptFingerprint`
+/// with the CBC IV chained across reads. Because our capture replays HP's exact
+/// command bytes, the sensor uses HP's key, which we recover from the same bytes.
+///
+/// One imaging burst is a single contiguous CBC ciphertext (IV = the command's
+/// IV, then block-chained), so decrypting the whole burst in one pass with that
+/// initial IV reproduces HP's per-read chaining. Trailing bytes beyond a 16-byte
+/// multiple cannot form a block and are dropped. No padding is removed: the
+/// plaintext is a raw `01fe`-framed image line stream, not an SSL record.
+pub fn decrypt_image_stream(key: &[u8; 32], iv: &[u8; 16], ct: &[u8]) -> Vec<u8> {
+    let n = ct.len() / 16 * 16;
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut dec = Aes256CbcDec::new(key.into(), iv.into());
+    let mut pt = ct[..n].to_vec();
+    for chunk in pt.chunks_mut(16) {
+        dec.decrypt_block_mut(chunk.into());
+    }
+    pt
+}
+
 /// 32 random bytes for ClientHello.client_random.
 pub fn random_bytes(n: usize) -> Vec<u8> {
     let mut v = vec![0u8; n];
@@ -256,5 +284,24 @@ mod tests {
     #[test]
     fn finished_label_matches_python() {
         assert_eq!(FINISHED_LABEL, 0x434C4E54u32.to_le_bytes());
+    }
+
+    #[test]
+    fn image_stream_decrypt_roundtrips() {
+        use super::{decrypt_image_stream, Aes256CbcEnc};
+        use aes::cipher::{BlockEncryptMut, KeyIvInit};
+        let key = [7u8; 32];
+        let iv = [3u8; 16];
+        let plain: Vec<u8> = (0..96u16).map(|i| (i * 5) as u8).collect(); // 6 blocks
+        let mut enc = Aes256CbcEnc::new(key.as_ref().into(), iv.as_ref().into());
+        let mut ct = plain.clone();
+        for chunk in ct.chunks_mut(16) {
+            enc.encrypt_block_mut(chunk.into());
+        }
+        // Full recovery, and a trailing partial block is dropped (not a full AES block).
+        assert_eq!(decrypt_image_stream(&key, &iv, &ct), plain);
+        let mut ct_short = ct.clone();
+        ct_short.extend_from_slice(&[0xabu8; 5]);
+        assert_eq!(decrypt_image_stream(&key, &iv, &ct_short), plain);
     }
 }
