@@ -85,6 +85,24 @@ enum Command {
         #[arg(long)]
         socket: Option<String>,
     },
+    /// Run continuously as a feeder: capture on each finger touch, decode, and
+    /// push the image to libfprint's virtual_image socket so fprintd/PAM/GDM can
+    /// enroll and verify. Idle cycles (no finger) are skipped quietly.
+    Daemon {
+        /// Socket path (defaults to $FP_VIRTUAL_IMAGE).
+        #[arg(long)]
+        socket: Option<String>,
+        /// Minimum ridge spectral peak-to-mean to accept a capture as a finger
+        /// (finger ~1.8, blank noise ~1.1); paired with the crop-ratio test.
+        #[arg(long, default_value_t = 1.4)]
+        min_ridge: f32,
+        /// Capture a single frame and feed it, then exit (for testing).
+        #[arg(long)]
+        once: bool,
+        /// Seconds to wait between capture cycles.
+        #[arg(long, default_value_t = 1)]
+        gap: u64,
+    },
 }
 
 fn main() -> Result<()> {
@@ -158,6 +176,86 @@ fn main() -> Result<()> {
             let (px, w, h) = image::reconstruct(&lines, true);
             virtimage::send_image(&sock, &px, w as u32, h as u32)?;
             println!("[+] captured {}x{} and fed virtual_image", w, h);
+        }
+        Command::Daemon { socket, min_ridge, once, gap } => {
+            let sock = resolve_socket(socket)?;
+            run_daemon(&cli.base, &cfg, &sock, min_ridge, once, gap)?;
+        }
+    }
+    Ok(())
+}
+
+/// Capture one frame from the sensor and decode it to a reconstructed image.
+/// Returns `Ok(None)` when the capture holds no finger (too few decoded lines),
+/// so the daemon can skip idle cycles without treating them as errors. Each call
+/// opens a fresh session, which is the proven single-shot path; re-using a
+/// session across captures is not yet validated.
+fn capture_frame(
+    base: &std::path::Path,
+    cfg: &session::Config,
+    dli: &image::DliConfig,
+    min_ridge: f32,
+) -> Result<Option<(Vec<u8>, u32, u32)>> {
+    let mut dev = usb::Sensor::open()?;
+    let mut rec = session::handshake(&dev, cfg)?;
+    let stream = capture::arm_capture(&mut dev, &mut rec, base, cfg)?;
+    let lines = image::decode_ep2(&stream, 272, dli);
+    if lines.rows < 60 {
+        return Ok(None);
+    }
+    let (px, w, h) = image::reconstruct(&lines, true);
+    // The sensor streams high-variance noise even with no finger, so contrast
+    // alone can't gate. A real finger shows up two ways at once: the reconstruct
+    // finger-segmentation crops to a distinct band (output height much smaller
+    // than the decoded line count), and the image has a ridge spectral peak. A
+    // blank capture stays near full height and is spectrally flat.
+    let crop_ratio = h as f32 / lines.rows as f32;
+    let pk = image::ridge_peak(&px, w, h);
+    if crop_ratio > 0.6 || pk < min_ridge {
+        log::debug!(
+            "skip: no finger (crop_ratio {:.2}, ridge_peak {:.2} < {:.2})",
+            crop_ratio,
+            pk,
+            min_ridge
+        );
+        return Ok(None);
+    }
+    log::info!("finger captured: {w}x{h} (crop_ratio {crop_ratio:.2}, ridge_peak {pk:.2})");
+    Ok(Some((px, w as u32, h as u32)))
+}
+
+/// Feeder loop: capture on each finger touch and push the image to libfprint's
+/// virtual_image socket. Errors on one cycle (a transient USB or socket failure)
+/// are logged and the loop continues, so the daemon survives fprintd restarts.
+fn run_daemon(
+    base: &std::path::Path,
+    cfg: &session::Config,
+    sock: &str,
+    min_ridge: f32,
+    once: bool,
+    gap: u64,
+) -> Result<()> {
+    // Suppress the interactive capture prompt; the host UI drives the user.
+    std::env::set_var("VFS_NO_PROMPT", "1");
+    let dli = image::DliConfig::load_main(base)?;
+    log::info!("vfs495 feeder daemon: socket {sock}, min_ridge {min_ridge}");
+    log::info!("waiting for finger touches (press and hold when your desktop asks to scan)");
+    loop {
+        match capture_frame(base, cfg, &dli, min_ridge) {
+            Ok(Some((px, w, h))) => match virtimage::send_image(sock, &px, w, h) {
+                Ok(()) => log::info!("fed {w}x{h} image to virtual_image"),
+                Err(e) => log::warn!(
+                    "captured {w}x{h} but socket feed failed: {e}                      (is fprintd running with FP_VIRTUAL_IMAGE set to {sock}?)"
+                ),
+            },
+            Ok(None) => log::debug!("no finger this cycle; skipping"),
+            Err(e) => log::warn!("capture cycle failed: {e}"),
+        }
+        if once {
+            break;
+        }
+        if gap > 0 {
+            std::thread::sleep(std::time::Duration::from_secs(gap));
         }
     }
     Ok(())

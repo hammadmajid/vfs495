@@ -145,6 +145,30 @@ pub struct Lines {
     pub cols: usize,
 }
 
+impl Lines {
+    /// Median per-line standard deviation — a finger-contact quality metric.
+    ///
+    /// A ridged fingerprint line swings between ridge and valley, giving a high
+    /// per-row std (~70 on this sensor); a flat no-contact/baseline line is
+    /// near-uniform (std well under 25). Taking the median over all rows rejects
+    /// a few stray high-contrast rows in an otherwise blank capture.
+    pub fn median_line_std(&self) -> f32 {
+        if self.rows == 0 || self.cols == 0 {
+            return 0.0;
+        }
+        let mut sds: Vec<f32> = (0..self.rows)
+            .map(|r| {
+                let row = &self.data[r * self.cols..(r + 1) * self.cols];
+                let mean = row.iter().sum::<f32>() / self.cols as f32;
+                let var = row.iter().map(|&x| (x - mean) * (x - mean)).sum::<f32>() / self.cols as f32;
+                var.sqrt()
+            })
+            .collect();
+        sds.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sds[sds.len() / 2]
+    }
+}
+
 /// Parse a `lines.raw`-format buffer: repeated `<u16 LE width><width bytes>`
 /// (the descrambled output of [`unpack_line`] / HP's UnpackLineRT).
 pub fn load_lines_raw(buf: &[u8]) -> Lines {
@@ -337,6 +361,56 @@ pub fn finger_segment(lines: &Lines) -> (usize, usize) {
 /// Returns (pixels, cols, rows). If cropping yields an implausibly small band
 /// (< 1/8 of the input, e.g. a capture that is entirely finger data), the full
 /// frame is kept instead.
+/// Ridge spectral peak-to-mean of a reconstructed grayscale image.
+///
+/// Averages the columns into a 1-D profile and takes its magnitude spectrum; a
+/// real fingerprint has a dominant peak in the ridge band (period ~8-16 px on
+/// this sensor, ratio > ~1.4), while sensor noise with no finger is spectrally
+/// flat (ratio near 1.0). Used with the finger-segmentation crop ratio to decide
+/// whether a capture actually holds a finger.
+pub fn ridge_peak(px: &[u8], w: usize, h: usize) -> f32 {
+    if w < 32 || h == 0 {
+        return 0.0;
+    }
+    // Column-mean profile (length w), mean-removed.
+    let mut prof = vec![0f32; w];
+    for x in 0..w {
+        let mut acc = 0f32;
+        for y in 0..h {
+            acc += px[y * w + x] as f32;
+        }
+        prof[x] = acc / h as f32;
+    }
+    let mean = prof.iter().sum::<f32>() / w as f32;
+    for v in prof.iter_mut() {
+        *v -= mean;
+    }
+    // Hann window, then a direct DFT magnitude over the ridge frequency band.
+    let band = (w / 16).max(2)..=(w / 8).max(3);
+    let mut peak = 0f32;
+    let mut sum = 0f32;
+    let mut cnt = 0f32;
+    for k in 3..w / 2 {
+        let (mut re, mut im) = (0f32, 0f32);
+        for (n, &v) in prof.iter().enumerate() {
+            let win = 0.5 - 0.5 * (2.0 * std::f32::consts::PI * n as f32 / (w as f32 - 1.0)).cos();
+            let ang = -2.0 * std::f32::consts::PI * (k * n) as f32 / w as f32;
+            re += v * win * ang.cos();
+            im += v * win * ang.sin();
+        }
+        let mag = (re * re + im * im).sqrt();
+        sum += mag;
+        cnt += 1.0;
+        if band.contains(&k) && mag > peak {
+            peak = mag;
+        }
+    }
+    if sum == 0.0 {
+        return 0.0;
+    }
+    peak / (sum / cnt)
+}
+
 pub fn reconstruct(lines: &Lines, crop: bool) -> (Vec<u8>, usize, usize) {
     let seg = if crop { finger_segment(lines) } else { (0, lines.rows) };
     // Keep the detected finger band as long as it is a usable strip (>= 20 lines).

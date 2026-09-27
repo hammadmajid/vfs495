@@ -427,7 +427,12 @@ pub fn arm_capture(
             continue;
         }
         if i == swipe_at {
-            eprintln!("\n>>> PRESS AND HOLD your finger on the sensor NOW (firm, steady) <<<\n");
+            // In daemon/quiet mode the host UI (GNOME/fprintd) shows its own prompt,
+            // so suppress ours; still pause so a finger already on the sensor lands
+            // within the imaging window.
+            if std::env::var("VFS_NO_PROMPT").is_err() {
+                eprintln!("\n>>> PRESS AND HOLD your finger on the sensor NOW (firm, steady) <<<\n");
+            }
             std::thread::sleep(std::time::Duration::from_millis(1200));
         }
         let cmd_op = plain[0];

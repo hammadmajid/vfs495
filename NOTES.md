@@ -1002,3 +1002,44 @@ a **264 x 623** finger band — a real fingerprint (per-line/global sd ~57, domi
 (key/IV recovered from the replayed command's SecurityParams TLV) works live, closing the session-4b
 blocker. The open driver is now complete end to end: session -> transport -> capture -> EP2 decrypt ->
 demux -> unpack/reconstruct, all in open Rust.
+
+---
+
+## 2026-09-28 (session 6) — feeder daemon: continuous capture -> virtual_image, with finger-presence gate
+
+Built `vfs495 daemon`: the persistent feeder that makes the sensor usable through stock fprintd/PAM/GDM
+via libfprint's `virtual_image` bridge. Loop = open+handshake -> arm_capture (decrypts EP2) -> decode ->
+finger gate -> `send_image` to $FP_VIRTUAL_IMAGE. Fresh session per capture (proven single-shot path
+repeated; re-using a session across captures still unvalidated). `VFS_NO_PROMPT=1` suppresses the
+interactive press prompt (the desktop UI drives the user). Flags: `--socket`, `--min-ridge` (default 1.4),
+`--once`, `--gap`.
+
+### Key finding: finger presence is NOT separable by contrast
+The imaging burst is high-variance sensor NOISE even with no finger (confirmed live, no-finger runs):
+decoded no-finger stream = 15892 lines, median per-line sd ~48 — indistinguishable from a finger by
+contrast/line-count. So line-count and contrast gates both FAIL (my first two attempts fed no-finger
+noise). The real discriminators, measured live (finger = user's /tmp/swipe.bin, no-finger = fresh
+capture):
+- reconstruct finger-segmentation **crop ratio** (out_h / decoded_rows): finger ~0.08-0.30, but NOISY
+  (a no-finger run also hit 0.30) -> not reliable alone.
+- **ridge spectral peak/mean** (column-mean profile, ridge band period ~8-16px): finger **1.81**,
+  no-finger **1.10-1.14**. This is the robust signal.
+Gate = accept only if crop_ratio < 0.6 AND ridge_peak >= min_ridge(1.4). Verified live: no-finger
+--once -> "skip: no finger (crop_ratio 0.30, ridge_peak 1.14 < 1.40)", no feed. Finger path proven by
+the offline 264x623 print (ridge_peak 1.81).
+
+### Caveat / next
+Finger detection is heuristic and tuned on n=1 finger + n=1 no-finger; margin is modest (1.81 vs 1.14).
+A weak swipe can false-reject, noise can false-accept. DURABLE FIX: use the `0x02` poll contact signal
+(`poll_probe` already reaches poll-ready and reads the contact delta without firing the imaging latch) to
+detect a finger BEFORE arming a full capture — not yet wired into the daemon. Also: to route the SYSTEM
+fprintd through the bridge needs a systemd drop-in setting FP_VIRTUAL_IMAGE (a system-config change; the
+project has not applied it — documented in README for the user to opt into).
+
+### Changes (committed)
+- image.rs: `Lines::median_line_std()` (contrast metric, kept for diagnostics) and `ridge_peak(px,w,h)`
+  (direct windowed DFT peak/mean over the ridge band).
+- capture.rs: swipe prompt gated on `VFS_NO_PROMPT`.
+- main.rs: `Command::Daemon` + `capture_frame` (crop-ratio + ridge_peak gate) + `run_daemon` loop.
+- README: daemon usage + GNOME/fprintd systemd drop-in wiring + finger-detection caveat.
+- 6 unit tests pass; clippy clean.

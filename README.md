@@ -109,15 +109,45 @@ vfs495 decode-lines --input captures/lines.raw --out fingerprint.pgm
 FP_VIRTUAL_IMAGE=/run/user/$(id -u)/vfs495.sock
 #   (start fprintd/libfprint with the virtual_image driver pointed at that socket)
 vfs495 run --socket "$FP_VIRTUAL_IMAGE"
+
+# 6. Run continuously as a feeder daemon (for enroll/verify through fprintd):
+#    captures on each finger touch, skips empty cycles, pushes images to the socket.
+sudo -E FP_VIRTUAL_IMAGE="$FP_VIRTUAL_IMAGE" vfs495 daemon
+#    --once     capture one frame and exit (testing)
+#    --min-ridge 1.4   finger-detection threshold (ridge spectral peak/mean)
 ```
 
-### Native GDM / sudo login
+### GNOME / fprintd integration (feeder daemon)
 
 GDM's fingerprint login is entirely fprintd/PAM-mediated — GDM never talks to the
-driver. Once images reach libfprint via `virtual_image`, `fprintd-enroll` /
-`fprintd-verify`, the GNOME Settings fingerprint UI, and PAM-based `sudo`/GDM all
-work through the stock stack. The enroll → match → reject round-trip through
+driver. Once decoded images reach libfprint via `virtual_image`, `fprintd-enroll`
+/ `fprintd-verify`, the GNOME Settings fingerprint UI, and PAM-based `sudo`/GDM
+all work through the stock stack. The enroll → match → reject round-trip through
 libfprint is proven in [`scripts/vimage_proof.py`](scripts/vimage_proof.py).
+
+The **`vfs495 daemon`** command bridges the two: it captures on each finger
+touch, decodes, and pushes the image to the `virtual_image` socket. To route the
+system `fprintd` through it, point fprintd at the same socket with a systemd
+drop-in (**a system-config change you must opt into**):
+
+```sh
+# /etc/systemd/system/fprintd.service.d/virtual-image.conf
+[Service]
+Environment=FP_VIRTUAL_IMAGE=/run/vfs495.sock
+```
+
+```sh
+sudo systemctl daemon-reload && sudo systemctl restart fprintd
+sudo -E FP_VIRTUAL_IMAGE=/run/vfs495.sock vfs495 daemon      # leave running
+fprintd-enroll        # then press & hold when prompted (five stages)
+fprintd-verify
+```
+
+Finger presence is detected heuristically (the sensor streams high-variance noise
+even with no finger, so the daemon gates on the reconstruct crop ratio plus a
+ridge spectral peak). This is tunable via `--min-ridge` but is the least robust
+part; the durable fix is the `0x02` poll contact signal (`vfs495 poll-probe`),
+not yet wired into the daemon.
 
 ---
 
@@ -137,6 +167,9 @@ libfprint is proven in [`scripts/vimage_proof.py`](scripts/vimage_proof.py).
 - **Unowned sensors only.** Owned sensors need the pairing (`TakeOwnership`) flow
   — fully mapped in `NOTES.md` but not implemented, since it is a persistent,
   cycle-limited sensor write.
+- **Finger detection in the daemon is heuristic** (crop ratio + ridge spectral
+  peak), tuned on a small sample. A weak swipe can be rejected and pathological
+  noise accepted; the robust fix is poll-based contact detection.
 - **RSA modulus is per-device** and read from `captures/modulus.json`. The sensor
   delivers it in an opaque signed key blob during init (not a plain SSL
   certificate), so generic auto-extraction isn't wired up; on a different unit,
