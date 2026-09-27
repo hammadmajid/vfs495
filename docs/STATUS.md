@@ -8,7 +8,11 @@ chronological, dated reasoning and evidence behind every claim here, see
 Status as of 2026-09-28: **the full open capture path — secure session, transport,
 image decryption, decode, and reconstruction — runs in open Rust with no HP code
 and is live-confirmed on hardware.** A feeder daemon bridges it to libfprint for
-GNOME/fprintd. Remaining work is integration polish, not protocol unknowns.
+GNOME/fprintd. Finger detection uses a **ridge-peak gate** on each decoded capture
+(live-confirmed 2026-09-28: finger 2.10 vs no-finger 1.21); the earlier WOE
+poll-divergence gate was falsified as finger-blind and removed (see §7). Remaining
+work is the end-to-end daemon → fprintd enroll/verify run and integration polish —
+no protocol unknowns.
 
 ---
 
@@ -161,10 +165,10 @@ HP tracing harness verbs: `getver`, `get_ownership_info`, `getprintwait`,
 | `src/crypto.rs` | SSLv3 KDF, RSA (LE modulus, PKCS#1 v1.5), length-less MAC, AES-256-CBC record layer, `decrypt_image_stream` (EP2). Byte-exact vs `captures/skey_dump.json` (`vfs495 selftest`). |
 | `src/usb.rs` | libusb transport (rusb): EP1 OUT/IN, EP2 image; `read_record` / `read_record_split`; kernel-driver detach/reattach. |
 | `src/session.rs` | init replay + open SSLv3 handshake → active record layer. |
-| `src/capture.rs` | in-session command replay, EP2 decrypt, `arm_capture`, `capture_on_finger` (WOE poll detection). |
+| `src/capture.rs` | in-session command replay, EP2 decrypt, `arm_capture` (full imaging capture → decrypted stream), `poll_probe` diagnostic. |
 | `src/image.rs` | `UnpackLineRT` port, descramble, assembly, reconstruction → PGM; `ridge_peak`, `median_line_std`. |
 | `src/virtimage.rs` | feed a decoded image to `$FP_VIRTUAL_IMAGE`. |
-| `src/main.rs` | CLI: `selftest`, `handshake`, `capture`, `poll-probe`, `decode`, `decode-lines`, `feed`, `run`, `daemon`. |
+| `src/main.rs` | CLI: `selftest`, `handshake`, `capture`, `poll-probe`, `ridge-probe`, `decode`, `decode-lines`, `feed`, `run`, `daemon`. |
 
 Toolchain: `libusb1-devel`; non-root USB via `packaging/70-vfs495.rules`.
 6 unit tests pass; clippy-clean.
@@ -195,20 +199,47 @@ driver, so the sensor works through stock **fprintd / PAM / GDM / sudo** with no
 custom C driver. The enroll → match → reject round-trip through libfprint is
 proven in `scripts/vimage_proof.py`.
 
-**Two-stage finger detection** (the sensor streams high-variance imaging noise
-even with no finger, so contrast alone cannot gate):
+**Finger detection — ridge gate (the sensor streams high-variance imaging noise
+even with no finger, so contrast, line count, and the segmentation crop all fail
+to gate; only the ridge spectral peak works).** Each cycle the daemon fires a full
+imaging capture (`arm_capture`), decodes it, and accepts it as a finger iff the
+reconstructed image's **ridge spectral peak-to-mean** clears `--min-ridge`. That
+is the sole gate. Measured live 2026-09-28 with the `ridge-probe` diagnostic:
 
-1. **Poll detection (WOE-style)** — `capture::capture_on_finger`, mirroring HP's
-   `idsSensorWOEFingerprintPoll`: reach poll-ready, poll the `0x02` command
-   (~2.4 KB reply, no big burst), build a no-finger baseline from the first few
-   replies, then flag a finger when the reply diverges by more than `--contact-nd`
-   bytes. The imaging latch is fired **only** on a detected touch. No-finger
-   baseline verified stable on hardware at ~10 bytes of jitter (threshold 30).
-2. **Ridge gate** — the decoded image must clear a ridge spectral peak-to-mean
-   test (`--min-ridge`, finger ~1.8 vs noise ~1.1) before it is fed.
+| capture | ridge_peak | crop_ratio | verdict @1.4 |
+|---------|-----------|-----------|--------------|
+| no finger | **1.21** | 0.857 | reject ✓ |
+| finger (held) | **2.10** | 0.995 | accept ✓ |
 
-Tunables: `--contact-nd` (30), `--max-wait-polls` (20), `--min-ridge` (1.4),
-`--gap`, `--once`. `VFS_NO_PROMPT=1` suppresses the interactive capture prompt.
+- `ridge_peak` separates cleanly (noise ~1.1–1.2, finger ~1.8–2.1); the default
+  `--min-ridge 1.4` sits between them.
+- `crop_ratio` is **not** a finger signal and was removed from the gate: a held
+  finger covers nearly every line, so segmentation crops nothing (0.995 > the
+  no-finger 0.857 — the wrong direction). It is logged for diagnostics only.
+- Firing the imaging latch every cycle is safe (the "latch stresses the sensor"
+  premise was falsified in §6, and HP images full swipes on one stable address).
+
+Diagnostic: `vfs495 ridge-probe [--min-ridge N]` — captures, decodes, prints
+`ridge_peak`/`crop_ratio`/line count and the daemon verdict without gating, and
+writes a PGM. Run once with a finger and once without to compare / retune.
+
+**Falsified and removed (2026-09-28): the WOE poll-divergence gate.** The former
+`capture::capture_on_finger` polled `seq[17]` (0x02 GetFingerprint) and watched for
+reply divergence from a no-finger baseline. Live test with a finger held firmly the
+entire run showed that poll is **finger-blind**: reply byte-divergence stayed flat
+at `nd = 2–4` and the pre-latch EP2 stayed a constant 5712 B at mean ≈127 / sd ≈74,
+identical with and without contact. Replaying a captured poll returns a canned
+reply plus free-running AFE noise; without the `0x17`/`0x04` imaging latch there is
+no finger signal. The old "~10 byte baseline jitter" was measuring that noise. The
+poll path, `--contact-nd`, and `--max-wait-polls` were deleted. If a low-power gate
+is wanted later (to avoid imaging on empty cycles), investigate the **unused EP3
+interrupt endpoint** or a dedicated WOE command — not a replayed swipe poll.
+(`vfs495 poll-probe` remains as a diagnostic; its defaults were corrected to
+`--prefix 17 --poll-idx 17` — index 16 is a `0x06` calibration command with a
+constant reply and no EP2, the earlier off-by-one that read all zeros.)
+
+Tunables: `--min-ridge` (1.4), `--gap`, `--once`. `VFS_NO_PROMPT=1` suppresses the
+interactive capture prompt.
 
 **To route the system fprintd through the bridge** (a system-config change the
 user must opt into), add a systemd drop-in setting `FP_VIRTUAL_IMAGE` and run the
@@ -223,16 +254,25 @@ daemon — see the README "GNOME / fprintd integration" section.
 - Full command replay with continuous EP2 draining, no sensor reset.
 - AES-256-CBC EP2 image decryption (key recovered from the replayed command).
 - Open decode + reconstruction → real fingerprint (264×623, ridge ~10.6 px).
-- Feeder daemon with poll-based finger detection; libfprint enroll/verify proven.
+- libfprint enroll/verify through `virtual_image` proven (`vimage_proof.py`).
+- **Finger detection: ridge-peak gate, live-confirmed** (finger 2.10 vs no-finger
+  1.21, threshold 1.4). Daemon rebuilt on it; the finger-blind WOE poll gate and
+  the misleading crop-ratio condition were removed. See §7.
 
-**Remaining (integration polish, not protocol unknowns):**
-- Confirm the finger-side poll divergence live and tune `--contact-nd` (a touch
-  shifts many AFE registers, expected well above 30).
-- Verify the open unpack is byte-exact for frame-type `07` (payload decodes to
-  ridges, so almost certainly yes).
-- fprintd systemd drop-in for `FP_VIRTUAL_IMAGE` — a user-opt-in system change.
+**Remaining:**
+- End-to-end daemon run: `vfs495 daemon --once` (or with a socket) driving a real
+  `fprintd-enroll`/`fprintd-verify` — the gate is validated in isolation via
+  `ridge-probe`, but the full daemon → socket → fprintd loop with a live finger has
+  not been exercised yet.
 - Repeated-capture reliability: each capture opens a fresh session (the proven
   single-shot path); re-using a session across captures is not yet validated.
+- Enroll may need several good frames; a held-finger capture is a tall full-height
+  image (crop does not isolate a band). Feed quality across enroll stages unproven.
+- fprintd systemd drop-in for `FP_VIRTUAL_IMAGE` — a user-opt-in system change.
+- Verify the open unpack is byte-exact for frame-type `07` (payload decodes to
+  ridges, so almost certainly yes).
+- Optional: a low-power gate via the unused **EP3 interrupt endpoint** to avoid
+  imaging on empty cycles (currently every cycle images then gates on the picture).
 - Owned-sensor pairing is mapped but unimplemented (not needed here).
 - Per-device RSA modulus auto-extraction is not wired (dump per unit).
 

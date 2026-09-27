@@ -1081,3 +1081,94 @@ nd 0-4 at delta>4.) The finger-side magnitude (delta with a real touch) should b
 ### Follow-ups
 - Confirm finger-side poll delta live and tune `--contact-nd`.
 - fprintd systemd drop-in (FP_VIRTUAL_IMAGE) still a user-opt-in system-config change (README).
+
+## 2026-09-28 (session 7) — *** WOE POLL GATE FALSIFIED LIVE: seq[17] 0x02 poll is finger-blind ***
+
+Goal for the session: step 1 of system integration — get the daemon polling so we
+could touch the sensor, measure the finger-side poll divergence, and finally tune
+`--contact-nd` (the long-standing open item). Result: the poll-based detection
+does not work at all, and we now know why.
+
+### Setup
+- Installed the udev rule (`/etc/udev/rules.d/70-vfs495.rules`); `udevadm trigger`
+  applied the `uaccess` ACL to the live device with no replug (`user:bine:rw-`).
+  This is USB access only — no PAM/GDM/fprintd change.
+- Sensor present at 138a:003f, session/handshake healthy every run.
+
+### Bug found first: poll-probe was probing the wrong command
+- `poll-probe` defaults were `--prefix 16 --poll-idx 16`. Index 16 is a `0x06`
+  calibration command that returns a constant 405 B reply and **no EP2 data**, so
+  the first run read `nd=0, EP2 0B` on all 40 polls — pure off-by-one, not a sensor
+  fact. The `0x02` GetFingerprint poll the daemon actually watches is `seq[17]`
+  (`capture::POLL_IDX = 17`, 2691 B, carries the SecurityParams TLV).
+- Fixed the `poll-probe` defaults to `17/17` and documented the trap in the CLI
+  help. `capture_on_finger` was already correct (`POLL_IDX = 17`).
+
+### The finding (two live runs)
+Looping `seq[17]` with EP2 draining, 40 polls @ 150 ms:
+- **Run A** (press mid-run per the cue): `nd` flat at 3–4 the whole time, no jump in
+  the press window; EP2 constant 5712 B, mean ≈128, sd ≈74 every poll.
+- **Run B** (finger pressed FIRMLY for the entire run, before launch to after
+  "done"): identical — `nd` flat 2–4, EP2 constant 5712 B mean ≈127 sd ≈74.
+
+Conclusion: **`seq[17]` is finger-blind.** Replaying a captured `0x02` poll returns
+a canned reply plus free-running AFE noise; without the `0x17`/`0x04` imaging latch
+the sensor produces no finger-dependent signal in either the reply or the pre-latch
+EP2 stream. The WOE poll-divergence gate cannot work at this index, and
+`--contact-nd` has no usable threshold. The earlier "no-finger baseline ~10 bytes
+jitter" was measuring this noise; the finger side had never been confirmed — this
+is the first time it was, and it is negative.
+
+### Consequence and plan
+- Daemon stage-1 detection is dead as designed. Rebuild on the **ridge gate**
+  (stage 2), which is the proven finger signal (crop_ratio < 0.6 and ridge_peak
+  above ~1.4; finger ~1.8 vs noise ~1.1): fire the imaging latch on a timer,
+  decode, gate on the reconstructed image, drop the poll stage. Firing the latch
+  per cycle is acceptable — the "imaging latch stresses/re-enumerates the sensor"
+  premise was already falsified in session 4.
+- Before rewiring: confirm live that the ridge gate separates finger from
+  no-finger (a `capture` with a finger vs. without, compare `ridge_peak`).
+- Worth a look first: HP may deliver finger-present events out of band on the
+  **unused EP3 interrupt endpoint** or via a dedicated WOE command (not the
+  replayed swipe poll). If so, that would restore a low-power gate.
+
+### Changed
+- `src/main.rs`: `poll-probe` defaults 16/16 → 17/17 + help note.
+- `docs/STATUS.md`: §7 rewritten (poll gate falsified, ridge gate is the detector),
+  §8 blocker recorded, header status corrected.
+
+### Follow-ups
+- Confirm ridge gate finger/no-finger discrimination live.
+- Rebuild daemon finger detection on the ridge gate (or EP3-interrupt WOE).
+- Only then: fprintd systemd drop-in + enroll/verify.
+
+### Ridge-gate discrimination CONFIRMED; daemon rebuilt on ridge-only gate
+Added `vfs495 ridge-probe` (fires a full `arm_capture`, decodes, prints
+rows/crop_ratio/ridge_peak + the daemon verdict without gating, writes a PGM).
+Live results:
+- No finger: ridge_peak **1.21**, crop_ratio 0.857 -> verdict reject.
+- Finger held: ridge_peak **2.10**, crop_ratio 0.995 -> ridge passes, but the old
+  gate's crop_ratio<=0.6 condition FAILED (a held finger covers ~all lines so
+  segmentation crops nothing -> crop_ratio ~1.0, actually HIGHER than no-finger).
+
+Conclusions:
+- `ridge_peak` is a clean discriminator (noise ~1.2, finger ~2.1); default
+  `--min-ridge 1.4` separates them.
+- `crop_ratio` is NOT a finger signal (wrong direction on a static press) and was
+  the reason a real finger was being rejected. Removed from the gate.
+
+Changes:
+- `capture_frame` (main.rs) now: `arm_capture` -> decode -> gate on `ridge_peak >=
+  min_ridge` ALONE (rows>=60 sanity floor; crop_ratio logged for diagnostics only).
+  Dropped the dead poll-detection stage.
+- Removed `capture::capture_on_finger`, `process_image_command`, `payload_delta`,
+  `BASELINE_POLLS`, `POLL_IDX` (all only served the falsified poll gate). Left a
+  note pointing future low-power-gate work at EP3.
+- Daemon CLI/`run_daemon`/`capture_frame` lost `--contact-nd`/`--max-wait-polls`.
+  Remaining daemon flags: `--socket --min-ridge(1.4) --once --gap`.
+- Build clean, clippy clean (only pre-existing warnings), 6 unit tests pass.
+
+Not yet done: run the daemon end-to-end into fprintd (enroll/verify) with a live
+finger; validate feed quality across enroll stages; session reuse across captures.
+Everything above (poll-probe default fix + ridge-probe + daemon rebuild) NOT yet
+committed.

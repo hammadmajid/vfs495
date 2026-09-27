@@ -147,15 +147,18 @@ fprintd-enroll        # then press & hold when prompted (five stages)
 fprintd-verify
 ```
 
-Finger presence is detected in two stages. First, WOE-style: the daemon reaches
-poll-ready, then polls the `0x02` command and watches the reply for a large
-divergence from a no-finger baseline (the reply is near-constant with no finger —
-~10 bytes of jitter — and a touch shifts many AFE registers at once). Only when a
-finger is detected does it fire the imaging latch, so empty cycles never stress
-the sensor. Second, the decoded image must clear a ridge spectral-peak gate before
-it is fed. Tunables: `--contact-nd` (poll divergence threshold, default 30),
-`--max-wait-polls`, and `--min-ridge`. The poll threshold's no-finger margin is
-verified on hardware; confirm/tune the finger side with a live touch.
+Finger presence is decided from the decoded image's **ridge spectral peak-to-mean**
+(`--min-ridge`, default 1.4). Each cycle the daemon fires a full imaging capture,
+decodes it, and feeds it only if the ridge peak clears the threshold. Measured live:
+a held finger scores ~2.1, blank sensor noise ~1.2, so the default cleanly
+separates them. Use `vfs495 ridge-probe` to measure and retune on your hardware
+(it prints the metrics and the accept/reject verdict for a capture without gating).
+
+> An earlier WOE-style poll-divergence gate (poll `0x02`, watch the reply for a
+> jump on contact) was **removed** after hardware testing showed that poll is
+> finger-blind — its reply and the pre-latch image stream do not change on contact.
+> A low-power gate that avoids imaging on empty cycles would need the EP3 interrupt
+> endpoint or a dedicated WOE command; not yet investigated.
 
 ---
 
@@ -175,10 +178,11 @@ verified on hardware; confirm/tune the finger side with a live touch.
 - **Unowned sensors only.** Owned sensors need the pairing (`TakeOwnership`) flow
   — fully mapped in `NOTES.md` but not implemented, since it is a persistent,
   cycle-limited sensor write.
-- **Finger detection is two-stage**: a WOE-style poll-divergence gate decides
-  when to image (no-finger baseline verified stable at ~10; contact threshold 30),
-  then a ridge spectral-peak gate validates the decoded image before feeding. Both
-  thresholds are tunable; the finger-side poll magnitude should be confirmed live.
+- **Finger detection is a ridge spectral-peak gate** on each decoded capture
+  (`--min-ridge`, default 1.4; live-measured finger ~2.1 vs noise ~1.2). The daemon
+  images every cycle and decides from the picture — safe, since imaging does not
+  stress the sensor. The end-to-end daemon → fprintd enroll/verify run with a live
+  finger is not yet exercised; the gate itself is validated via `ridge-probe`.
 - **RSA modulus is per-device** and read from `captures/modulus.json`. The sensor
   delivers it in an opaque signed key blob during init (not a plain SSL
   certificate), so generic auto-extraction isn't wired up; on a different unit,
