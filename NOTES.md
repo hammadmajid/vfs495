@@ -38,7 +38,7 @@ writes without explicit OK; stop and ask for a finger swipe when needed
 - .gitignore excludes vendor/, venvs, large raw captures.
 
 ### Next
-1. Verify commit signing (1Password op-ssh-sign) with initial commit.
+1. Verify commit signing with initial commit.
 2. Install strace + rizin (record for user).
 3. Read prior art: saifulmd0/vfs495-linux and rindeal driver; summarize
    protocol/SSLv3/where pairing blocks.
