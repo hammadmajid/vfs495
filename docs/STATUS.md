@@ -21,10 +21,11 @@ no protocol unknowns.
 - **Sensor:** Validity VFS495 ("Falcon"), USB `138a:003f`, HP EliteBook 820 G3
   and other 2015-era HP laptops. `bcdDevice 1.04`. Endpoints: EP1 IN/OUT bulk 64,
   EP2 IN bulk 64 (image), EP3 IN interrupt 8.
-- **Repo:** local-only git at `~/Developer/lab/vfs495`, no remote, never
-  published. HP's package and all extractions live in `vendor/` (gitignored,
-  never committed). Biometric captures, raw USB traces, and HP patch blobs are
-  also gitignored.
+- **Repo:** git at `~/Developer/lab/vfs495`, remote `origin`
+  (github.com/hammadmajid/vfs495). HP's package and all extractions live in
+  `vendor/` (gitignored, never committed). Biometric captures, raw USB traces, and
+  HP patch blobs are also gitignored — keep them out of commits since the repo is
+  published.
 - **Do not**, without explicit user OK: send `TakeOwnership` / `setowner` /
   `resetowner` (persistent, cycle-limited sensor writes), or change system
   fprintd / PAM / authselect / GDM config.

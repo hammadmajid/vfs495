@@ -4,7 +4,8 @@
 - **Always commit your changes. Do NOT ask for permission to commit — just commit.**
 - Commit at the end of a piece of work (a fix, a finding, a doc update), with a
   clear message describing what changed and why.
-- This repo is local-only (no remote); do not push.
+- This repo has a remote (`origin`, github.com/hammadmajid/vfs495); push after
+  committing.
 
 ## Docs
 - **Always keep docs in sync with new findings and progress.** When project state,
