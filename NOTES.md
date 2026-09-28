@@ -1268,3 +1268,21 @@ like structure in no-finger noise. NOT yet solved. Options to evaluate:
   (d) require a SWIPE (not a hold): a swipe yields a segmentable band (crop_ratio
       low ~0.06-0.3) that no-finger (crop ~1.0) never does, restoring crop_ratio as
       a discriminator alongside ridge — matches this being a swipe sensor.
+
+### PAUSED here 2026-09-28 (resume pointer)
+Work paused for a few days. Exact resume state is in docs/STATUS.md §0 ("Resume
+here"). Summary: detection blocker = no-finger ridge_peak drifts (~1.2 fresh ->
+~1.6-1.8 used) into finger range (~2.1) because our AFE calibration is a fixed
+replay vs HP's closed-loop scsSensorFalconCalibrate. Decision: implement C-full
+(port the closed-loop calibration). NEXT ACTION = run scripts/trace_calibration.gdb.py
+(sudo, get_ownership_info -doinit, no finger) -> captures/calib_trace.txt, then map
+the 7 calibration steps and port them.
+
+Tooling added this session (persistent, in scripts/):
+- scripts/trace_calibration.gdb.py — gdb trace of scsSensorFalconCalibrate's
+  LoadPatch/GetCountedLines calls (the pending NEXT ACTION runs this).
+- scripts/enroll_verify_probe.py — enroll+verify any PGM through libfprint direct
+  (no fprintd). Proves the image path; PASS on real captures 2026-09-28.
+- scripts/live_enroll.py — live daemon enroll+verify harness with press/hold/lift
+  cues; ready for when detection is fixed.
+Nothing uncommitted after this entry.
