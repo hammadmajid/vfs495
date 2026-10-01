@@ -60,11 +60,15 @@ only once the finger has moved (diff >= 0.35 x run median contact sd), giving na
 refused by `run`/daemon. Cues now print exactly at each imaging window:
 "DO NOT TOUCH" → "SWIPE NOW (1 of 2)" → "SWIPE NOW (2 of 2)" → "Done".
 
-**NEXT ACTION (needs the user):** `python3 scripts/live_enroll.py` in a normal
-terminal — 5 enroll rounds + 1 verify through libfprint. Cues are colour-only:
-RED don't touch, GREEN swipe the same finger slowly down, YELLOW wait; ✓/✗ per
-round; Ctrl+C stops it. This is the first meaningful genuine-match test (two different swipes of the
-same finger); earlier self-match "passes" proved nothing.
+**Live enroll (2026-10-02):** 5/5 enroll stages accepted from 5 real swipes, but
+**different swipes do not match** (offline leave-one-out on 6 saved swipes: 0/6
+genuine; control self-match OK). Cause: swipe speed. The threshold de-stretch gives
+each swipe a different vertical scale (pairwise 0.70-1.40) and uneven distortion.
+
+**NEXT ACTION (offline, no user needed):** port HP's swipe reconstructor
+(`IRreconstructImage` @0x468ff0, `vcsImageGetSwipeSpeed`, `DecideSpeed`) to replace
+`reconstruct_swipe`'s threshold; validate by isotropy + cross-swipe scale ≈1 + the
+leave-one-out match. Then one more `scripts/live_enroll.py` run by the user.
 
 **Sensor access note:** the udev rule is installed (`user:bine:rw-`); it survives
 re-enumeration. If the sensor gets wedged, a full power-off (not just reboot) clears

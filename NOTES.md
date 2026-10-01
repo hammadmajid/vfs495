@@ -1528,3 +1528,23 @@ showed ✗) and it is unknown which image verify got. Fixed: the enroll loop sto
 (`VFS_SAVE_FED=<dir>` in `vfs495 run`; the harness uses its temp dir and prints it)
 so matching can be analysed offline; the benign virtual_image "Got empty data"
 warning (our sender closing the socket) is silenced.
+
+### 2026-10-02 — live enroll run 2: genuine cross-swipe matching FAILS; cause = swipe scale distortion
+User ran the fixed live_enroll.py (no overlap). Six fed images saved
+(/tmp/vfs_live_b48drip7): all clear prints of the same finger (200x335-449).
+Offline leave-one-out (enroll 5, verify the held-out 6th; scratch loo.py):
+genuine match = False for all 6 held-outs; control (verify with an enrolled image)
+= True; a synthetic different print -> "minutiae detection failed". So the feeding
+path is sound and the prints are real, but different swipes don't match.
+(Pitfall found: importing scripts/enroll_verify_probe.py overwrites
+FP_VIRTUAL_IMAGE at import time — import it before setting your own socket.)
+Cause measured: best-NCC relative VERTICAL SCALE between swipe pairs ranges
+0.70-1.40, often with weak peak NCC -> the threshold de-stretch gives each swipe a
+different (and internally varying) scale; NBIS/bozorth3 can't match through that.
+A single scan line can't see motion where ridges run parallel to the swipe.
+Checked: the imaging stream has no navigation frames (208-stride frames are the
+calibration sweeps); the 224..264 column strip carries finger texture but is NOT a
+simple time-lagged copy of the main line (windowed NCC search: no consistent x/lag).
+HP has a software reconstructor: IRreconstructImage @0x468ff0, vcsImageGetSwipeSpeed,
+DecideSpeed, gSwipeSpeed, idsSensorPickImageReconstructor — being RE'd (agent).
+`vfs495 run` with VFS_SAVE_FED now also saves the decrypted stream (fed_<ts>.stream).

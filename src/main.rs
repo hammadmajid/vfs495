@@ -245,10 +245,11 @@ fn main() -> Result<()> {
                 bail!("finger touched but did not swipe ({contact} contact rows, no motion) — nothing fed");
             };
             let (fpx, fw, fh) = image::window_for_feed(&px, w, h);
-            // VFS_SAVE_FED=<dir>: keep a copy of every fed image (offline analysis).
+            // VFS_SAVE_FED=<dir>: keep every fed image + its decrypted stream (offline analysis).
             if let Ok(dir) = std::env::var("VFS_SAVE_FED") {
                 let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis();
                 image::write_pgm(&format!("{dir}/fed_{ts}.pgm"), &fpx, fw, fh)?;
+                std::fs::write(format!("{dir}/fed_{ts}.stream"), &stream)?;
             }
             virtimage::send_image(&sock, &fpx, fw as u32, fh as u32)?;
             println!("[+] captured a {w}x{h} swipe ({contact} contact rows) and fed {fw}x{fh} to virtual_image");
