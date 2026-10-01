@@ -5,56 +5,45 @@ engineering of HP's binary, and the current state of the open driver. For the
 chronological, dated reasoning and evidence behind every claim here, see
 [`../NOTES.md`](../NOTES.md). For build and usage, see [`../README.md`](../README.md).
 
-Status as of 2026-09-28: **the full open capture path — secure session, transport,
+Status as of 2026-10-01: **the full open capture path — secure session, transport,
 image decryption, decode, and reconstruction — runs in open Rust with no HP code
 and is live-confirmed on hardware.** A feeder daemon bridges it to libfprint for
 GNOME/fprintd. A real live capture enrolls + verifies through libfprint. The one
 open blocker is **finger detection**: the ridge-peak gate's no-finger baseline
-drifts up into the finger range over hours of use, because our AFE calibration is a
-fixed replay instead of HP's closed-loop sweep. The fix in progress is porting that
-calibration (see the Resume section).
+drifts into the finger range. Root cause confirmed (session 10): 4 stale
+calibration values in the replayed command stream; fresh values restore a clean
+no-finger baseline. The fix in progress is computing them per session (see §0).
 
 ---
 
-## 0. Resume here (paused 2026-09-28, session 9)
+## 0. Resume here (session 10, 2026-10-01)
 
-**Where we are:** everything works *except* reliable finger detection. Proven and
-committed: open session/transport/decrypt/decode → real print; ridge-peak gate
-(finger ~2.1 vs fresh no-finger ~1.2); daemon **session reuse** (fixed the
-repeated-capture USB re-enumeration — 6 back-to-back cycles, stable address); a real
-live capture **enrolls all 5 stages + verifies** through libfprint
-(`scripts/enroll_verify_probe.py`); image-size clamp for libfprint moved to
-`window_for_feed` (feed only), gate stays on the full image.
+**Where we are:** everything works *except* reliable finger detection, and its root
+cause is now **confirmed and narrow**. Proven and committed: open session/transport/
+decrypt/decode → real print; ridge-peak gate; daemon session reuse; a real live
+capture enrolls + verifies through libfprint (`scripts/enroll_verify_probe.py`).
 
-**The blocker:** the no-finger ridge_peak **drifts** from ~1.2 (fresh sensor) to
-~1.6–1.8 (after hours), overlapping a finger (~2.1), so a fixed `--min-ridge` can't
-separate them. Not the sensor failing and not session reuse — confirmed it persists
-across a full power-cycle, and it is *not* my earlier clamp bug (that was fixed).
-Root cause: our calibration replays fixed, pre-converged AFE values, while HP's
-`scsSensorFalconCalibrate` is **closed-loop** and re-converges each session; without
-a fresh sweep the AFE baseline drifts with temperature/time (our own RE notes
-predicted exactly this — NOTES.md "Calibration … CLOSED-LOOP").
+**Root cause (confirmed session 10):** our replayed `capture_seq.json` carries
+**4 stale calibration outputs** from the day it was recorded. Diffing fresh HP command
+streams against the recording shows only these vary (besides the random key/IV TLV):
+reg `0x300420c8` (rec 5, fresh 5/4), a byte after `00ff000000000000` (rec 0x84,
+fresh 0x85/0x86), regs `0x30042120` and `0x30042160` (rec 7, fresh 6). They live in
+a calibration-override section near the end of each later `0x02` (offsets >2000).
+A/B with no finger: stale values → ridge_peak 2.73 / 2.18 (false finger); today's
+fresh HP values → 1.38 / 1.06 (correct). Details: NOTES.md 2026-10-01.
 
-**Decision:** implement **C-full** — port HP's closed-loop calibration so the AFE
-re-converges each session, restoring a wide, stable ridge margin (and better image
-quality). Chosen over heuristic workarounds (swipe+crop_ratio, adaptive baseline).
+**How HP computes them:** `scsSensorFalconCalibrate` is a state machine; each of the
+7 steps is ONE sweep frame (capture_seq idx 6..12) where the sensor sweeps a register
+across line groups, and the step function (pure computation: `scsFalconCalSumLines`,
+`scsFalconCalNextSweepValue`, `calResultsSetByte/Word`) picks the value, which is
+carried into the next command.
 
-**NEXT ACTION (exactly where to pick up):** run the calibration trace and analyze it.
-```
-cd ~/Developer/lab/vfs495 && sudo env LD_LIBRARY_PATH="$PWD/vendor/runtime/lib" \
-  gdb -batch -x scripts/trace_calibration.gdb.py \
-  --args vendor/runtime/bin/validity-sensor-unlocked get_ownership_info -doinit
-```
-This needs root (libusb-0.1), no finger, no ownership write (safe verb). It writes
-`captures/calib_trace.txt` = every `scsSensorLoadPatch` (register write) and
-`scsSensorGetCountedLinesSynch` (frame read) call during `scsSensorFalconCalibrate`,
-in order. Then: (1) read the trace to map the 7 steps
-(CommDet/PgaOffset/Adc/PgaGain/AspLna1/AspPga1/Woe) and their iteration counts;
-(2) for each step, figure out the measured statistic and adjust rule (may need
-deeper gdb tracing of the compare logic); (3) port the loop to Rust, run it at
-session start replacing the fixed calibration-block replay in `capture_seq.json`;
-(4) verify no-finger ridge drops back to ~1.2 and stays stable, then resume the live
-enroll (`scripts/live_enroll.py`) and the fprintd systemd drop-in.
+**NEXT ACTION:** trace `calResultsSetByte/SetWord` + step entries during HP
+calibration to map step → field and dump (sweep frame, chosen value) ground-truth
+pairs; RE the deciding step algorithm(s); port to Rust; at session start, run the
+sweep commands, compute the 4 values, patch them into the override section of all
+later commands; verify no-finger ridge stays ~1.2. Then live enroll
+(`scripts/live_enroll.py`) and the fprintd systemd drop-in.
 
 **Sensor access note:** the udev rule is installed (`user:bine:rw-`); it survives
 re-enumeration. If the sensor gets wedged, a full power-off (not just reboot) clears

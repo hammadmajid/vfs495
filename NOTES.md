@@ -1286,3 +1286,52 @@ Tooling added this session (persistent, in scripts/):
 - scripts/live_enroll.py — live daemon enroll+verify harness with press/hold/lift
   cues; ready for when detection is fixed.
 Nothing uncommitted after this entry.
+
+## 2026-10-01 — session 10: drift ROOT CAUSE CONFIRMED = 4 stale calibration values
+
+### Calibration trace (scripts/trace_calibration.gdb.py, get_ownership_info -doinit, no finger)
+`scsSensorFalconCalibrate` @0x4fcb20 is a re-entered state machine (11 "ENTER"s in one
+run), not one call. Only 8 `scsSensorGetCountedLinesSynch` reads (7 sweep frames + 1)
+and a handful of LoadPatch calls. Static call graph explains it: the seven step
+functions (scsFalconCalCommDet/PgaOffset/Adc/PgaGain/AspLna1/AspPga1/Woe) do **no USB
+I/O at all** — only scsFalconCalSumLines, scsFalconCalNextSweepValue (memcpy into
+the next command), and calResultsSetByte/SetWord. So each step = ONE frame in which
+the sensor itself sweeps a register across line groups; the host sums lines per
+sweep value and picks the result. Calibrate dispatches the step via `call *0x28(%r13)`
+after each counted read. The 7 sweep frames are the 7 `0x02` commands at
+capture_seq idx 6..12 (len 2711/2503/2516/2742/2612/2625/2666).
+
+### Where the outputs go: diff of HP plaintext command streams
+Ran HP's own stack twice more today (scsSend plaintext hook, safe verb) and diffed
+against the recorded `plaintext_cmds.txt` (the source of capture_seq.json):
+- first 0x02 (2331B) bytes 2225-2288 differ every run = the random AES key/IV TLV.
+- 0x12 (57B) identical across all runs.
+- Otherwise ONLY 4 values vary, all register-write TLVs `03 00 09 00 <addr32 LE> <val32>`
+  in a calibration-override section near the END of each later 0x02 (offsets >2000;
+  the base table at offsets 247/364/663 holds fixed sweep params):
+
+  | field                     | recorded (replayed) | fresh A | fresh B |
+  |---------------------------|---------------------|---------|---------|
+  | reg 0x300420c8            | 5                   | 5       | 4       |
+  | byte after `00ff000000000000` | 0x84            | 0x85    | 0x86    |
+  | reg 0x30042120            | 7                   | 6       | 6       |
+  | reg 0x30042160            | 7                   | 6       | 6       |
+
+  They first appear progressively in the sweep commands (c8 from idx 8, the 0x84 byte
+  from idx 9, 2120/2160 from idx 12) — i.e. each step's result is carried into the
+  next step's command — and then in every poll/imaging command (17/22/23/26/27/41;
+  2691B @2429/2450/2460/2473, 3029B shifted -4).
+
+### Decisive A/B (ridge-probe, NO finger, alternating, same sensor state)
+Patched every override occurrence (47 sites) in a copy of capture_seq.json:
+- stale recorded values (5/0x84/7/7, = what we replay): ridge_peak **2.73, 2.18** -> false FINGER
+- fresh HP-B values (4/0x86/6/6):                       ridge_peak **1.38, 1.06** -> no finger
+=> The no-finger drift is ENTIRELY explained by replaying stale calibration outputs.
+Fix scope is now small: compute these 4 values from our own 7 sweep frames each
+session (port only the step(s) that produce them) and patch them into the
+override section. Not the whole 7-step loop blindly.
+
+NEXT: trace calResultsSetByte/SetWord + step-function entry during HP calibration to
+map step -> field and capture (frame, result) ground-truth pairs; RE the deciding
+step algorithm(s) (SumLines/NextSweepValue); port to Rust, verify offline against
+the ground truth, then live.
