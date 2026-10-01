@@ -1411,3 +1411,23 @@ today's calibration port + EP2 line-drop fix (verified against HP frames directl
 Open question being tested offline: is our DECODE wrong, or is the live CAPTURE not
 imaging the finger? Test = run our decrypt+decode on HP's own recorded swipe
 (getprint_trace.usblog + its plaintext commands).
+
+### Decode-vs-capture triage: DECODE IS CORRECT (offline, HP's recorded swipe)
+Agent matched captures/capture_swipe.usblog to captures/plaintext_cmds.txt (53 EP1 OUT
+writes 1:1; every AppData len = plaintext+20 MAC padded to 16; decrypts only with
+those keys). NB getprint_trace.usblog does NOT match plaintext_cmds.txt (88 writes);
+SecurityParams keys are random per command per run. Decrypting HP's imaging bursts
+(after cmds 33/37) with our scheme: 6358/6338 `01fe` frames at 272 stride, all type
+`0707`. Our `vfs495 decode` of them = a clear loop-pattern fingerprint, coherence
+0.907/0.903 (ref fingerprint_open.png 0.872; open-path captures 0.09). Minimal
+processing (perm+stack+column-mean removal) also shows sharp ridges, so reconstruct
+neither creates nor hides structure. => decrypt/demux/unpack/perm/reconstruct are
+fine; the fault is in what the sensor outputs under OUR live drive.
+
+### Lead: frame type 0606 (ours, no finger) vs 0707 (HP swipe; also the user's 5b swipe)
+Our live no-finger decrypted stream today: 16451 frames, ALL type `0606`. HP's swipe:
+all `0707`. Session 5b's /tmp/swipe.bin (a user SWIPE through our driver) was also
+`0707` with spectral peak 5.15 (never visually checked; file gone). Hypothesis: the
+type byte reflects sensor-side finger state/mode (06 = no finger, 07 = finger), and
+the VFS495 being a SWIPE sensor, our "press and hold" tests never gave it a moving
+finger. Next: user swipe through `vfs495 capture`, check frame types + coherence.
