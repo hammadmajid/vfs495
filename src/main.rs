@@ -169,10 +169,12 @@ fn main() -> Result<()> {
             if lines.rows == 0 {
                 bail!("no lines decoded — capture produced no frames");
             }
-            let (verdict, contact) = finger_gate(&lines, min_contact);
-            let (px, w, h) = image::reconstruct(&lines, true);
+            let (gate, contact) = finger_gate(&lines, min_contact);
+            let swipe = image::reconstruct_swipe(&lines);
+            let verdict = gate && swipe.is_some();
+            let (px, w, h) = swipe.unwrap_or_else(|| image::reconstruct(&lines, true));
             let ridge = image::ridge_peak(&px, w, h);
-            println!("[i] reconstructed image: {w}x{h}");
+            println!("[i] reconstructed image: {w}x{h} ({})", if verdict { "swipe" } else { "no usable swipe" });
             println!("[i]   contact rows = {contact}   (THE gate — no finger 0, swipe thousands; gate >= {min_contact})");
             println!("[i]   ridge_peak   = {ridge:.2}   (diagnostic only — NOT a finger signal)");
             println!(
@@ -199,7 +201,14 @@ fn main() -> Result<()> {
                     lines.contact_rows(25.0)
                 );
             }
-            let (px, w, h) = image::reconstruct(&lines, !no_crop);
+            let (px, w, h) = match (no_crop, image::reconstruct_swipe(&lines)) {
+                (false, Some(img)) => img,
+                (false, None) => {
+                    println!("[!] no usable swipe (finger moving across the sensor); writing the raw band");
+                    image::reconstruct(&lines, true)
+                }
+                (true, _) => image::reconstruct(&lines, false),
+            };
             image::write_pgm(out.to_str().unwrap(), &px, w, h)?;
             println!("[+] wrote {} ({}x{})", out.display(), w, h);
         }
@@ -227,13 +236,17 @@ fn main() -> Result<()> {
             let stream = capture::arm_capture(&mut dev, &mut rec, &cli.base, &cfg)?;
             let cfg = image::DliConfig::load_main(&cli.base)?;
             let lines = image::decode_ep2(&stream, 272, &cfg);
-            if lines.rows < 20 {
-                bail!("capture produced too few lines ({})", lines.rows);
+            // Never feed a blank capture (a missed swipe) into an enrollment.
+            let (accept, contact) = finger_gate(&lines, DEFAULT_MIN_CONTACT);
+            if !accept {
+                bail!("no finger detected ({contact} contact rows < {DEFAULT_MIN_CONTACT}) — nothing fed");
             }
-            let (px, w, h) = image::reconstruct(&lines, true);
+            let Some((px, w, h)) = image::reconstruct_swipe(&lines) else {
+                bail!("finger touched but did not swipe ({contact} contact rows, no motion) — nothing fed");
+            };
             let (fpx, fw, fh) = image::window_for_feed(&px, w, h);
             virtimage::send_image(&sock, &fpx, fw as u32, fh as u32)?;
-            println!("[+] captured {w}x{h} and fed {fw}x{fh} to virtual_image");
+            println!("[+] captured a {w}x{h} swipe ({contact} contact rows) and fed {fw}x{fh} to virtual_image");
         }
         Command::Daemon { socket, min_contact, once, gap } => {
             let sock = resolve_socket(socket)?;
@@ -246,14 +259,11 @@ fn main() -> Result<()> {
 /// Default `--min-contact`: well above a blank sensor (0) and far below a swipe
 /// (~4000-6000 rows), so partial swipes still pass.
 const DEFAULT_MIN_CONTACT: usize = 300;
-/// Row sd (after removing the fixed column pattern) that counts as contact:
-/// a blank sensor is ~4-10, a finger's rows ~25-60.
-const CONTACT_SD: f32 = 25.0;
 
 /// The finger gate: enough decoded lines and at least `min_contact` rows with
 /// real finger contact (see `Lines::contact_sd`). Returns (accept, contact rows).
 fn finger_gate(lines: &image::Lines, min_contact: usize) -> (bool, usize) {
-    let contact = lines.contact_rows(CONTACT_SD);
+    let contact = lines.contact_rows(image::CONTACT_SD);
     (lines.rows >= 60 && contact >= min_contact, contact)
 }
 
@@ -291,7 +301,10 @@ fn capture_frame(
         log::debug!("skip: no finger ({contact} contact rows < {min_contact})");
         return Ok(None);
     }
-    let (px, w, h) = image::reconstruct(&lines, true);
+    let Some((px, w, h)) = image::reconstruct_swipe(&lines) else {
+        log::info!("skip: finger touched but did not swipe ({contact} contact rows, no motion)");
+        return Ok(None);
+    };
     // Clamp the pixels we actually feed to a libfprint-acceptable height.
     let (fpx, fw, fh) = image::window_for_feed(&px, w, h);
     log::info!("finger captured: {w}x{h} ({contact} contact rows); feeding {fw}x{fh}");

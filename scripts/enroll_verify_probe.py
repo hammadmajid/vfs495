@@ -3,7 +3,9 @@
 fprintd/PAM/system change). Proves whether an image produces a usable minutiae
 template: enroll -> verify-same (expect match) -> verify-different (expect reject).
 
-Usage:  python3 scripts/enroll_verify_probe.py <print.pgm>
+Usage:  python3 scripts/enroll_verify_probe.py <print.pgm> [<same-finger-2.pgm>]
+With a second, independent capture of the same finger, also runs the genuine
+cross-match (the only meaningful test — any image, even noise, matches itself).
 
 Requires python3-gobject + libfprint with the virtual_image driver (Fedora ships
 it) and numpy. Creates its own temp socket; nothing persistent is touched.
@@ -58,8 +60,9 @@ from gi.repository import FPrint, GLib
 
 def main():
     if len(sys.argv) < 2:
-        print("usage: enroll_verify_probe.py <print.pgm>"); return 1
+        print("usage: enroll_verify_probe.py <print.pgm> [<same-finger-2.pgm>]"); return 1
     A = load_pgm(sys.argv[1]).astype(np.uint8)
+    G = load_pgm(sys.argv[2]).astype(np.uint8) if len(sys.argv) > 2 else None
     B = synth_print(A.shape[0], A.shape[1])
     print(f"[i] enroll image A = {sys.argv[1]} {A.shape}  (B = synthetic-different)")
 
@@ -92,6 +95,16 @@ def main():
     except GLib.Error as e:
         print(f"[!] verify(same) error: {e.message}"); same_ok = False
 
+    gen_ok = True
+    if G is not None:
+        feeder.set(G); time.sleep(0.8)
+        try:
+            r = dev.verify_sync(enrolled)
+            gen_ok = bool(r[0] if isinstance(r, tuple) else r)
+            print(f"[{'+' if gen_ok else '!'}] VERIFY(genuine, 2nd capture): match={gen_ok} (expect True)")
+        except GLib.Error as e:
+            print(f"[!] verify(genuine) error: {e.message}"); gen_ok = False
+
     feeder.set(B); time.sleep(0.8)
     try:
         r = dev.verify_sync(enrolled)
@@ -101,7 +114,7 @@ def main():
         print(f"[i] verify(diff) raised {e.message} -> non-match"); diff_ok = True
 
     dev.close_sync(); feeder.stop = True
-    ok = same_ok and diff_ok
+    ok = same_ok and diff_ok and gen_ok
     print("\n=== RESULT:", "PASS" if ok else "FAIL", "===")
     return 0 if ok else 3
 

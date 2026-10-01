@@ -1479,3 +1479,25 @@ missing was a swipe. Image is vertically stretched (no speed correction).
 while the same capture's ridge_peak was 2.51 (would have false-fired under the old
 gate). Swipe: 6258. Prompts in capture.rs, main.rs, README, live_enroll.py now say
 SWIPE (slowly, downward, 1-2 s; again ~3 s later), never hold.
+
+### Swipe reconstruction (image::reconstruct_swipe) — the images were ~6-10x stretched
+The sensor scans lines far faster than a finger moves, so a swipe repeats each skin
+row many times. First genuine cross-match (enroll swipe B, verify swipe A from the same
+capture, central 500-row windows) FAILED: each window was a thin vertical slice.
+Fix: within each run of contact rows (sd>=25), keep a row only once it differs from
+the last kept row by >= 0.35 x the run's median contact sd (~12 for a firm swipe;
+line-to-line noise ~5); pick the run with the most kept rows; 1-99% stretch; cols
+0..200. Results: user swipe B 6258 contact rows -> 200x215 natural loop print; HP's
+recorded swipe -> 200x274 print; our blank capture and swipe A -> rejected (A was
+a mostly RESTING finger + a short slide-off: contact sd ~25-28 runs with no motion).
+`run`, daemon, ridge-probe and decode now use it; a touch without motion is refused.
+Cross-match still unproven: needs two good swipes (A was not one).
+
+### Prompt timing bug (why swipe A missed): cue was ~4 s early
+In the user's log, the old cue printed at idx 16 (:34) but the imaging windows are
+cmd 23 (:39-:42) and cmd 27 (:43-:46); "swipe ~1 s after the prompt" landed before
+the sensor was recording. Now: "DO NOT TOUCH (calibrating)" at start, then
+">>> SWIPE NOW (k of 2)" printed exactly as each imaging command is sent (verified:
+cue :46 -> window :46-:49; cue :50 -> window :50-:53), then "Done — lift". Removed
+VFS_SWIPE_AT and the 1.2 s sleep. live_enroll.py lets these cues through (stderr not
+captured) and no longer prints its own timing claims.

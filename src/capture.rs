@@ -38,6 +38,12 @@ fn load_sequence(base: &Path) -> Result<Vec<Vec<u8>>> {
         .collect()
 }
 
+/// `capture_seq` indices of the two imaging commands (0x02 with a populated sign
+/// key). Each opens a ~2.5 s window in which the sensor streams image lines; a
+/// swipe must happen inside it (live-measured: the old cue, printed at idx 16,
+/// came ~4 s before the first window and made users miss it).
+const SWIPE_WINDOWS: [usize; 2] = [23, 27];
+
 /// Size of one EP2 bulk read. HP's driver reads the image stream in 16 KiB
 /// chunks back to back; matching that keeps the sensor's FIFO from filling.
 const EP2_CHUNK: usize = 16384;
@@ -417,10 +423,13 @@ pub fn arm_capture(
     // per-command slice is always a whole number of AES blocks.
     let mut cur_key: Option<[u8; 32]> = None;
     let mut cur_iv = [0u8; 16];
-    // Calibration (seq 0..~15) must run with NO finger. Cue a finger at the
-    // poll/imaging boundary (override with VFS_SWIPE_AT; set huge to disable).
-    let swipe_at: usize =
-        std::env::var("VFS_SWIPE_AT").ok().and_then(|v| v.parse().ok()).unwrap_or(16);
+    // User cues (suppressed with VFS_NO_PROMPT, e.g. in the daemon where the
+    // desktop prompts). Calibration (seq 0..~15) must run with NO finger; the
+    // swipe cue is printed exactly when each imaging window opens.
+    let prompt = std::env::var("VFS_NO_PROMPT").is_err();
+    if prompt {
+        eprintln!("\n>>> DO NOT TOUCH the sensor yet (calibrating, ~10 s). Wait for SWIPE NOW. <<<\n");
+    }
     // Experiment: the 1-byte 0x17 entries may be a trace artifact (the SSL AppData
     // record-type byte leaking into the command dump); each precedes a reset. Skip
     // them to test whether they are what triggers the imaging-latch re-enumeration.
@@ -431,17 +440,16 @@ pub fn arm_capture(
             log::info!("[{i:3}] skipping 1-byte 0x17 (artifact test)");
             continue;
         }
-        if i == swipe_at {
-            // In daemon/quiet mode the host UI (GNOME/fprintd) shows its own prompt,
-            // so suppress ours; still pause so a finger already on the sensor lands
-            // within the imaging window.
-            if std::env::var("VFS_NO_PROMPT").is_err() {
+        if prompt {
+            if let Some(k) = SWIPE_WINDOWS.iter().position(|&w| w == i) {
                 eprintln!(
-                    "\n>>> SWIPE NOW: in about 1 second, slide your finger slowly DOWN across the sensor\n    \
-                     (1-2 seconds). Then SWIPE ONCE MORE about 3 seconds later. Do NOT hold still. <<<\n"
+                    "\n>>> SWIPE NOW ({} of {}): slide your finger slowly DOWN across the sensor (1-2 s) <<<\n",
+                    k + 1,
+                    SWIPE_WINDOWS.len()
                 );
+            } else if i == SWIPE_WINDOWS[SWIPE_WINDOWS.len() - 1] + 1 {
+                eprintln!("\n>>> Done — lift your finger. <<<\n");
             }
-            std::thread::sleep(std::time::Duration::from_millis(1200));
         }
         let cmd_op = plain[0];
         if let Some((k, iv)) = parse_security_params(plain) {

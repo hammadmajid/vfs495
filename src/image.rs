@@ -179,9 +179,16 @@ impl Lines {
     /// the background as long as a finger covers under half of the rows — true
     /// for a swipe, not for a finger held still for the whole capture.
     pub fn contact_sd(&self) -> Vec<f32> {
+        self.contact_rows_bg().1
+    }
+
+    /// Rows of the main sensing columns with the fixed column pattern (per-column
+    /// median) removed, plus each row's std. Shared by the gate and the swipe
+    /// reconstruction.
+    fn contact_rows_bg(&self) -> (Vec<Vec<f32>>, Vec<f32>) {
         let cols = self.cols.min(CONTACT_COLS);
         if self.rows == 0 || cols == 0 {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         }
         let bg: Vec<f32> = (0..cols)
             .map(|x| {
@@ -190,14 +197,20 @@ impl Lines {
                 col[col.len() / 2]
             })
             .collect();
-        (0..self.rows)
+        let rows: Vec<Vec<f32>> = (0..self.rows)
             .map(|y| {
                 let row = &self.data[y * self.cols..y * self.cols + cols];
-                let d: Vec<f32> = row.iter().zip(&bg).map(|(v, b)| v - b).collect();
+                row.iter().zip(&bg).map(|(v, b)| v - b).collect()
+            })
+            .collect();
+        let sd = rows
+            .iter()
+            .map(|d| {
                 let mean = d.iter().sum::<f32>() / cols as f32;
                 (d.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / cols as f32).sqrt()
             })
-            .collect()
+            .collect();
+        (rows, sd)
     }
 
     /// Number of rows whose [`contact_sd`](Self::contact_sd) reaches `min_sd`.
@@ -208,6 +221,66 @@ impl Lines {
 
 /// Main sensing columns (the right-hand columns carry fixed calibration bars).
 const CONTACT_COLS: usize = 200;
+/// Row std (fixed pattern removed) that counts as finger contact: a blank
+/// sensor is ~4-10, a finger's rows ~25-60.
+pub const CONTACT_SD: f32 = 25.0;
+/// Fewest de-stretched rows that make a usable print.
+const MIN_SWIPE_ROWS: usize = 64;
+
+/// Reconstruct a swipe into a fingerprint image with one row per row of skin.
+///
+/// The sensor scans lines far faster than a finger moves, so a raw swipe repeats
+/// each skin row many times (images come out ~6-10x stretched, and a finger held
+/// still is one row repeated). Within each run of finger-contact rows, keep a
+/// row only once it differs from the last kept row by at least 0.35 × the run's
+/// median contact std (≈12 grey levels for a firm swipe, vs ~5 line-to-line
+/// noise) — i.e. once the finger has moved. The run yielding the most rows wins
+/// (a capture spans two swipe windows). Returns `None` without a usable swipe.
+/// Validated on a live swipe: 6258 contact rows -> a 200x331 loop-pattern print.
+pub fn reconstruct_swipe(lines: &Lines) -> Option<(Vec<u8>, usize, usize)> {
+    let (rows, sd) = lines.contact_rows_bg();
+    let mut best: Vec<&Vec<f32>> = Vec::new();
+    let mut y = 0;
+    while y < rows.len() {
+        if sd[y] < CONTACT_SD {
+            y += 1;
+            continue;
+        }
+        let start = y;
+        while y < rows.len() && sd[y] >= CONTACT_SD {
+            y += 1;
+        }
+        let mut run_sd = sd[start..y].to_vec();
+        run_sd.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let thr = 0.35 * run_sd[run_sd.len() / 2];
+        let mut kept: Vec<&Vec<f32>> = Vec::new();
+        for row in &rows[start..y] {
+            let moved = kept.last().map_or(true, |last| {
+                row.iter().zip(last.iter()).map(|(a, b)| (a - b).abs()).sum::<f32>() / row.len() as f32 >= thr
+            });
+            if moved {
+                kept.push(row);
+            }
+        }
+        if kept.len() > best.len() {
+            best = kept;
+        }
+    }
+    if best.len() < MIN_SWIPE_ROWS {
+        return None;
+    }
+    // Global 1st-99th percentile contrast stretch.
+    let mut all: Vec<f32> = best.iter().flat_map(|r| r.iter().copied()).collect();
+    all.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let (lo, hi) = (all[all.len() / 100], all[all.len() * 99 / 100]);
+    let span = (hi - lo).max(1e-3);
+    let w = best[0].len();
+    let px = best
+        .iter()
+        .flat_map(|r| r.iter().map(|&v| ((v - lo) / span * 255.0).clamp(0.0, 255.0) as u8))
+        .collect();
+    Some((px, w, best.len()))
+}
 
 /// Parse a `lines.raw`-format buffer: repeated `<u16 LE width><width bytes>`
 /// (the descrambled output of [`unpack_line`] / HP's UnpackLineRT).
@@ -497,6 +570,38 @@ pub fn write_pgm(path: &str, pixels: &[u8], cols: usize, rows: usize) -> std::io
 
 #[cfg(test)]
 mod tests {
+
+    /// Synthetic capture: `blank` quiet rows, then a ridge pattern (period 10
+    /// columns) sliding `step` skin-rows per sensor line for `moving` lines.
+    fn swipe_lines(blank: usize, moving: usize, step: f32) -> Lines {
+        let cols = 264;
+        let mut data = Vec::new();
+        for y in 0..blank + moving {
+            for x in 0..cols {
+                let v = if y < blank {
+                    128.0 + ((x * 7 + y * 3) % 5) as f32
+                } else {
+                    let skin = (y - blank) as f32 * step;
+                    128.0 + 50.0 * ((x as f32 + skin) * std::f32::consts::TAU / 10.0).sin()
+                };
+                data.push(v);
+            }
+        }
+        Lines { data, rows: blank + moving, cols }
+    }
+
+    #[test]
+    fn swipe_is_destretched_held_and_blank_are_rejected() {
+        // Finger moving 0.1 skin-row per line over 3000 lines = ~300 skin rows.
+        let (_, _, h) = reconstruct_swipe(&swipe_lines(4000, 3000, 0.1)).expect("swipe");
+        assert!((150..=450).contains(&h), "de-stretched height {h}");
+        // Held still: contact but no motion.
+        assert!(reconstruct_swipe(&swipe_lines(4000, 3000, 0.0)).is_none());
+        // Blank sensor.
+        assert!(reconstruct_swipe(&swipe_lines(7000, 0, 0.0)).is_none());
+        assert_eq!(swipe_lines(7000, 0, 0.0).contact_rows(CONTACT_SD), 0);
+    }
+
     use super::*;
 
     fn identity_perm(n: usize) -> Vec<i16> {

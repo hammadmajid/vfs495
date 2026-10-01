@@ -53,11 +53,17 @@ Live: no finger 0 rows (that same capture had ridge_peak 2.51 — the old gate w
 have falsely fired). ridge_peak is printed as a diagnostic only. All prompts now say
 SWIPE.
 
-**NEXT ACTION:** live enroll + verify through libfprint with swipes
-(`scripts/live_enroll.py`, prompts updated to swipe; its timing was built for holds
-and may need adjusting). Watch: the swipe image is vertically stretched (no
-swipe-speed correction yet) — check libfprint accepts it. Optional cleanup:
-`normalize`/`finger_segment` should use the median background like `contact_sd`.
+**Swipe reconstruction (session 10):** raw swipes were ~6-10x vertically stretched
+(the sensor scans faster than a finger moves). `image::reconstruct_swipe` keeps a row
+only once the finger has moved (diff >= 0.35 x run median contact sd), giving natural
+~200x215-275 prints (user swipe and HP's recorded swipe). A touch without motion is
+refused by `run`/daemon. Cues now print exactly at each imaging window:
+"DO NOT TOUCH" → "SWIPE NOW (1 of 2)" → "SWIPE NOW (2 of 2)" → "Done".
+
+**NEXT ACTION (needs the user):** `python3 scripts/live_enroll.py` — 5 enroll stages +
+1 verify through libfprint; at every ">>> SWIPE NOW" swipe the same finger slowly
+down. This is the first meaningful genuine-match test (two different swipes of the
+same finger); earlier self-match "passes" proved nothing.
 
 **Sensor access note:** the udev rule is installed (`user:bine:rw-`); it survives
 re-enumeration. If the sensor gets wedged, a full power-off (not just reboot) clears
@@ -361,7 +367,7 @@ libfprint-acceptable, minutiae-friendly image. (A swipe assembles to a few-hundr
 
 ## 9. Diagnostic env gates (in the driver)
 
-`VFS_NO_PROMPT` (suppress capture prompt), `VFS_SWIPE_AT` (finger-cue index),
+`VFS_NO_PROMPT` (suppress the DO NOT TOUCH / SWIPE NOW cues),
 `VFS_SKIP_17`, `VFS_NO_REHANDSHAKE`, `VFS_REOPEN_SETCONFIG`, `VFS_HP_RESUME`,
 `VFS_DUMP_SLICES=<dir>` (write each command's raw EP2 slice as `NN_raw.bin`;
 calibration sweep frames are idx 6..12, plaintext), `VFS_NO_CALIB` (replay the

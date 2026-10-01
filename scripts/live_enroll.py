@@ -7,18 +7,16 @@ fprintd/PAM/system change.
 Run from the repo root (the sensor must be accessible, e.g. udev uaccess rule
 installed):  python3 scripts/live_enroll.py
 
-Status 2026-09-28: BLOCKED upstream by finger detection, not by this harness. The
-ridge gate's no-finger baseline drifts (~1.2 fresh -> ~1.8 used) into the finger
-range (~2.1), so captures may mis-gate until closed-loop calibration (C-full) is
-implemented. See docs/STATUS.md. This harness is ready for when detection is fixed.
-Each stage: press+hold ~25s on the PRESS banner; lift on the LIFT banner; 5 stages
-+ 1 verify, same finger.
+This is a SWIPE sensor. Each capture takes ~20 s: the driver calibrates first,
+then prints its own ">>> SWIPE NOW" prompt at the exact moment the imaging window
+opens. Swipe ONLY when you see that prompt (slowly, downward, 1-2 s; once more
+~3 s later). `vfs495 run` refuses to feed a capture with no finger contact, so a
+missed swipe just retries. 5 enroll stages + 1 verify, same finger.
 """
 import os, sys, subprocess, threading, time, tempfile
 
 SOCK = os.path.join(tempfile.mkdtemp(prefix="vfs_live_"), f"vimg_{os.getpid()}.sock")
 os.environ["FP_VIRTUAL_IMAGE"] = SOCK
-os.environ.setdefault("VFS_NO_PROMPT", "1")
 
 def banner(lines):
     w = 60
@@ -39,18 +37,19 @@ def wait_for_device(timeout=20):
 def one_capture():
     if not wait_for_device():
         print("    [sensor not on bus]", flush=True); return False
-    env = {**os.environ, "RUST_LOG": "info", "VFS_NO_PROMPT": "1"}
+    # stderr is NOT captured: the driver's own ">>> SWIPE NOW" prompt must reach
+    # the terminal at the moment the imaging window opens.
+    env = {**os.environ, "RUST_LOG": "warn"}
+    env.pop("VFS_NO_PROMPT", None)
     try:
         p = subprocess.run(["./target/release/vfs495", "run", "--socket", SOCK],
-                           env=env, timeout=90, capture_output=True, text=True)
+                           env=env, timeout=90, stdout=subprocess.PIPE, text=True)
     except subprocess.TimeoutExpired:
         print("    [capture timed out]", flush=True); return False
-    out = (p.stdout or "") + (p.stderr or "")
+    out = p.stdout or ""
     for ln in out.splitlines():
-        if any(k in ln for k in ("finger captured", "ridge_peak", "fed ", "WARN",
-                                 "Error", "not found", "too few")):
-            print("    " + ln.strip(), flush=True)
-    return "fed " in out and "image" in out
+        print("    " + ln.strip(), flush=True)
+    return p.returncode == 0 and "fed " in out
 
 import gi
 gi.require_version("FPrint", "2.0")
@@ -79,10 +78,10 @@ def main():
             target = state["done"] + 1
             if target > stages:
                 break
-            banner([f"SWIPE YOUR FINGER NOW (slowly, downward, 1-2 s)", f"STAGE {target} OF {stages}",
-                    "SWIPE AGAIN ~3 s LATER; DO NOT HOLD STILL"])
+            banner([f"STAGE {target} OF {stages}: GET READY — DO NOT TOUCH YET",
+                    "Swipe each time you see '>>> SWIPE NOW' (twice, ~10 s from now)"])
             if not one_capture():
-                banner(["CAPTURE MISSED — wait for the next SWIPE prompt"])
+                banner(["NO FINGER SEEN — retrying; swipe at the next '>>> SWIPE NOW'"])
                 attempts += 1; time.sleep(6); continue
             if stage_event.wait(timeout=20):
                 stage_event.clear(); banner(["DONE — wait for the next SWIPE prompt"]); time.sleep(5.0)
@@ -101,7 +100,8 @@ def main():
         print(f"\n[!] ENROLL FAILED: {e.message}"); dev.close_sync(); return 2
     ft.join(timeout=5)
 
-    banner(["ENROLL DONE! NOW VERIFY", "SWIPE THE SAME FINGER (slowly, downward)"])
+    banner(["ENROLL DONE! NOW VERIFY — DO NOT TOUCH YET",
+            "Swipe the SAME finger when you see '>>> SWIPE NOW'"])
     vdone = {"v": False}
     def vfeeder():
         for _ in range(3):
@@ -109,7 +109,7 @@ def main():
                 return
             if one_capture():
                 return
-            banner(["VERIFY CAPTURE MISSED — swipe again, slowly"]); time.sleep(2)
+            banner(["NO FINGER SEEN — retrying; swipe at the next '>>> SWIPE NOW'"]); time.sleep(2)
     threading.Thread(target=vfeeder, daemon=True).start()
     ok = False
     try:
