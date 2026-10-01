@@ -42,3 +42,7 @@ captures/capture_cmd.json
 # Raw capture/pixel dumps (biometric + device data) — never commit
 captures/*.bin
 captures/capture_seq.json
+
+# HP calibration traces + sweep-frame dumps (device data)
+captures/calib_trace*.txt
+captures/calib_frames/

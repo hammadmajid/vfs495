@@ -38,9 +38,18 @@ across line groups, and the step function (pure computation: `scsFalconCalSumLin
 `scsFalconCalNextSweepValue`, `calResultsSetByte/Word`) picks the value, which is
 carried into the next command.
 
-**NEXT ACTION:** trace `calResultsSetByte/SetWord` + step entries during HP
-calibration to map step → field and dump (sweep frame, chosen value) ground-truth
-pairs; RE the deciding step algorithm(s); port to Rust; at session start, run the
+**Step → field (mapped session 10, `scripts/trace_calib_steps.gdb.py`):** order
+CommDet, PgaOffset, Adc, AspLna1, AspPga1, PgaGain, Woe = capture_seq idx 6..12.
+PgaOffset → reg `0x300420c8` (5 in all 5 runs today); **Adc** → the
+`00ff000000000000`-prefixed byte (129–133 across runs); **PgaGain** → regs
+`0x30042120`/`0x30042160` (6/6 today). Others were constant. Our replay receives
+byte-identical-format plaintext sweep frames on EP2 (same sizes as HP's).
+Ground truth (5 runs, frames + results) in `captures/calib_frames/run*/`,
+`captures/calib_trace_steps*.txt` (gitignored).
+
+**NEXT ACTION:** RE the three deciding step algorithms (Adc, PgaOffset, PgaGain)
+into reference implementations verified against the 5 ground-truth runs; port to
+Rust; at session start, run the
 sweep commands, compute the 4 values, patch them into the override section of all
 later commands; verify no-finger ridge stays ~1.2. Then live enroll
 (`scripts/live_enroll.py`) and the fprintd systemd drop-in.
@@ -348,6 +357,8 @@ libfprint-acceptable, minutiae-friendly image. (A swipe assembles to a few-hundr
 ## 9. Diagnostic env gates (in the driver)
 
 `VFS_NO_PROMPT` (suppress capture prompt), `VFS_SWIPE_AT` (finger-cue index),
-`VFS_SKIP_17`, `VFS_NO_REHANDSHAKE`, `VFS_REOPEN_SETCONFIG`, `VFS_HP_RESUME`.
+`VFS_SKIP_17`, `VFS_NO_REHANDSHAKE`, `VFS_REOPEN_SETCONFIG`, `VFS_HP_RESUME`,
+`VFS_DUMP_SLICES=<dir>` (write each command's raw EP2 slice as `NN_raw.bin`;
+calibration sweep frames are idx 6..12, plaintext).
 Most are leftovers from the re-enumeration investigation and are inert on the
 happy path; kept for regression probing.

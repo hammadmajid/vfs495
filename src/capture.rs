@@ -476,6 +476,10 @@ pub fn arm_capture(
         let (mean, sd) = mean_sd(slice);
         if !slice.is_empty() {
             log::info!("[{i:3}]   EP2 +{}B mean={mean:.1} sd={sd:.1}", slice.len());
+            // Diagnostic: dump each command's raw EP2 slice (calibration RE).
+            if let Ok(dir) = std::env::var("VFS_DUMP_SLICES") {
+                let _ = std::fs::write(format!("{dir}/{i:02}_raw.bin"), slice);
+            }
             // Decrypt this command's EP2 slice under the active image key, chaining
             // the CBC IV forward for the next slice (matches HP's per-read decrypt).
             if let Some(k) = cur_key {

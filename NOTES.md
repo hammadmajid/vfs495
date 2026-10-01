@@ -1335,3 +1335,18 @@ NEXT: trace calResultsSetByte/SetWord + step-function entry during HP calibratio
 map step -> field and capture (frame, result) ground-truth pairs; RE the deciding
 step algorithm(s) (SumLines/NextSweepValue); port to Rust, verify offline against
 the ground truth, then live.
+
+### Step -> field mapping (scripts/trace_calib_steps.gdb.py, 5 HP runs, no finger)
+Step order is CommDet, PgaOffset, Adc, AspLna1, AspPga1, PgaGain, Woe (= capture_seq
+idx 6..12; frame sizes 11648/53248/12480/5824/6656/6656/3264). Results via
+calResultsSetByte(container, tag, idx, value):
+- PgaOffset tag1 idx14 = 5 (all runs) -> reg 0x300420c8
+- Adc       tag2 idx15 = 130,129,133,133,129 -> the `00ff000000000000`-prefixed byte
+- PgaGain   tag3 idx16/17 = 6/6 (all runs) -> regs 0x30042120 / 0x30042160
+- constant across runs: CommDet (per-channel bits, 4/4), AspLna1 (per-channel bits),
+  AspPga1 tag6 idx16 = 3, Woe tag4 = 0xa0/0x1c/0.
+Each matches where the value first appears in the next sweep command. Our replay
+(new `VFS_DUMP_SLICES` diag) receives the same plaintext sweep frames on EP2 (same
+headers/sizes; only sample noise differs), so the port can run on our own frames.
+Adc varies run to run (129-133), so the session must compute it, not cache it.
+Now RE-ing the Adc/PgaOffset/PgaGain step algorithms against these 5 runs.
