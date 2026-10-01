@@ -44,6 +44,28 @@ fn load_sequence(base: &Path) -> Result<Vec<Vec<u8>>> {
 /// came ~4 s before the first window and made users miss it).
 const SWIPE_WINDOWS: [usize; 2] = [23, 27];
 
+/// A user cue, one short colored line: red = don't touch, green = swipe,
+/// yellow = wait. Kept to one or two words so it can be acted on at a glance.
+enum Cue {
+    DontTouch,
+    Swipe,
+    Wait,
+}
+
+fn cue(c: Cue) {
+    use std::io::IsTerminal;
+    let (bg, text) = match c {
+        Cue::DontTouch => ("41", "  DON'T TOUCH  "),
+        Cue::Swipe => ("42", "  SWIPE  \u{2193}  "),
+        Cue::Wait => ("43", "  WAIT  "),
+    };
+    if std::io::stderr().is_terminal() {
+        eprintln!("\x1b[1;30;{bg}m{text}\x1b[0m");
+    } else {
+        eprintln!("{}", text.trim());
+    }
+}
+
 /// Size of one EP2 bulk read. HP's driver reads the image stream in 16 KiB
 /// chunks back to back; matching that keeps the sensor's FIFO from filling.
 const EP2_CHUNK: usize = 16384;
@@ -428,7 +450,7 @@ pub fn arm_capture(
     // swipe cue is printed exactly when each imaging window opens.
     let prompt = std::env::var("VFS_NO_PROMPT").is_err();
     if prompt {
-        eprintln!("\n>>> DO NOT TOUCH the sensor yet (calibrating, ~10 s). Wait for SWIPE NOW. <<<\n");
+        cue(Cue::DontTouch);
     }
     // Experiment: the 1-byte 0x17 entries may be a trace artifact (the SSL AppData
     // record-type byte leaking into the command dump); each precedes a reset. Skip
@@ -441,14 +463,11 @@ pub fn arm_capture(
             continue;
         }
         if prompt {
-            if let Some(k) = SWIPE_WINDOWS.iter().position(|&w| w == i) {
-                eprintln!(
-                    "\n>>> SWIPE NOW ({} of {}): slide your finger slowly DOWN across the sensor (1-2 s) <<<\n",
-                    k + 1,
-                    SWIPE_WINDOWS.len()
-                );
-            } else if i == SWIPE_WINDOWS[SWIPE_WINDOWS.len() - 1] + 1 {
-                eprintln!("\n>>> Done — lift your finger. <<<\n");
+            if SWIPE_WINDOWS.contains(&i) {
+                cue(Cue::Swipe);
+            } else if let Some(prev) = i.checked_sub(1).filter(|p| SWIPE_WINDOWS.contains(p)) {
+                // The window has drained: wait for the next one, or stop.
+                cue(if prev == SWIPE_WINDOWS[SWIPE_WINDOWS.len() - 1] { Cue::DontTouch } else { Cue::Wait });
             }
         }
         let cmd_op = plain[0];

@@ -1501,3 +1501,19 @@ the sensor was recording. Now: "DO NOT TOUCH (calibrating)" at start, then
 cue :46 -> window :46-:49; cue :50 -> window :50-:53), then "Done — lift". Removed
 VFS_SWIPE_AT and the 1.2 s sleep. live_enroll.py lets these cues through (stderr not
 captured) and no longer prints its own timing claims.
+
+### 2026-10-02 — user-facing cues: color-only, minimal text; Ctrl+C fixed
+User feedback: too much text to read while acting; Ctrl+C did not stop live_enroll.py.
+- Driver cues (capture.rs `cue`) are now one short line each, ANSI background colour
+  on a TTY: RED "DON'T TOUCH" (calibration / after the last window), GREEN "SWIPE ↓"
+  (each imaging window), YELLOW "WAIT" (between the two windows). Plain words when
+  stderr is not a TTY.
+- live_enroll.py rewritten: shows only those cues plus a one-line ✓ n/5 / ✗ per
+  round; all other driver output hidden. Ctrl+C: libfprint's *_sync calls block in C
+  so Python's KeyboardInterrupt never ran — SIGINT now uses the default action
+  (verified: SIGINT to the process group stops the script and the capture child).
+- Bug caught in a dry run: starting `vfs495 run` immediately after the previous one
+  makes the sensor re-enumerate ("No such device", then "not found"). The harness
+  now waits 3 s + until the sensor is stably on the bus, and retries USB errors
+  silently; only a real miss (no finger / no swipe motion) shows ✗. Dry run with no
+  finger: every round shows the full cue sequence and ends ✗, as expected.

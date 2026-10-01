@@ -60,9 +60,10 @@ only once the finger has moved (diff >= 0.35 x run median contact sd), giving na
 refused by `run`/daemon. Cues now print exactly at each imaging window:
 "DO NOT TOUCH" → "SWIPE NOW (1 of 2)" → "SWIPE NOW (2 of 2)" → "Done".
 
-**NEXT ACTION (needs the user):** `python3 scripts/live_enroll.py` — 5 enroll stages +
-1 verify through libfprint; at every ">>> SWIPE NOW" swipe the same finger slowly
-down. This is the first meaningful genuine-match test (two different swipes of the
+**NEXT ACTION (needs the user):** `python3 scripts/live_enroll.py` in a normal
+terminal — 5 enroll rounds + 1 verify through libfprint. Cues are colour-only:
+RED don't touch, GREEN swipe the same finger slowly down, YELLOW wait; ✓/✗ per
+round; Ctrl+C stops it. This is the first meaningful genuine-match test (two different swipes of the
 same finger); earlier self-match "passes" proved nothing.
 
 **Sensor access note:** the udev rule is installed (`user:bine:rw-`); it survives
