@@ -436,7 +436,10 @@ pub fn arm_capture(
             // so suppress ours; still pause so a finger already on the sensor lands
             // within the imaging window.
             if std::env::var("VFS_NO_PROMPT").is_err() {
-                eprintln!("\n>>> PRESS AND HOLD your finger on the sensor NOW (firm, steady) <<<\n");
+                eprintln!(
+                    "\n>>> SWIPE NOW: in about 1 second, slide your finger slowly DOWN across the sensor\n    \
+                     (1-2 seconds). Then SWIPE ONCE MORE about 3 seconds later. Do NOT hold still. <<<\n"
+                );
             }
             std::thread::sleep(std::time::Duration::from_millis(1200));
         }

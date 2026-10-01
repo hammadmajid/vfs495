@@ -1463,3 +1463,19 @@ Per-row std after subtracting the per-column MEDIAN background, cols 0..200.
 Offline: HP swipe bursts 3924 / 3857 contact rows (sd>=25), p90 ~61; our no-finger
 captures 0 rows, p90 4.6 (calibrated) / 6.6 (stale). Printed by `vfs495 decode`.
 Not yet wired into the daemon gate — needs a live swipe through our driver first.
+
+### *** FIRST REAL PRINT from the fully-open path: a SWIPE ***
+User swiped (earlier test was a hold because the driver's own prompt said
+"PRESS AND HOLD" — my instructions conflicted with it; prompt now fixed). Result
+(/tmp/swipe_new.bin, `vfs495 capture` + `decode`): 8202 lines, 6258 contact rows,
+reconstructed 264x2026 with a clear loop-core print; coherence 0.98 reconstructed,
+0.96-0.99 per 256-row chunk with minimal processing. The whole open pipeline
+(session, per-session calibration, gap-free EP2, decrypt, decode) works; what was
+missing was a swipe. Image is vertically stretched (no speed correction).
+
+### Gate switched to contact rows; all prompts say SWIPE
+`--min-ridge` removed; daemon + ridge-probe gate on `--min-contact` (default 300)
+= rows with sd >= 25 after per-column-median background. Live no-finger: 0 rows,
+while the same capture's ridge_peak was 2.51 (would have false-fired under the old
+gate). Swipe: 6258. Prompts in capture.rs, main.rs, README, live_enroll.py now say
+SWIPE (slowly, downward, 1-2 s; again ~3 s later), never hold.

@@ -7,14 +7,12 @@ chronological, dated reasoning and evidence behind every claim here, see
 
 Status as of 2026-10-01: **the open secure session, transport, EP2 image decryption
 and per-session calibration run in open Rust with no HP code, live on hardware.**
-A feeder daemon bridges to libfprint for GNOME/fprintd. **However, no open-path
-image has yet contained a real fingerprint** (corrected session 10: earlier
-"real print" / "enrolls + verifies" claims were noise self-matching). The
+A feeder daemon bridges to libfprint for GNOME/fprintd. A user swipe now
+yields a real fingerprint image (session 10; earlier "real print" / "enrolls +
+verifies" claims from held-finger captures were noise self-matching). The
 former blocker — the no-finger ridge baseline drifting into the finger range — is
 fixed (session 10): calibration is now computed per session from our own sweep
-frames (open ports of HP's step functions). BUT (corrected session 10) no open-path
-image has yet shown real ridges — the decode/capture of the finger itself is the
-new blocker (see §0).
+frames (open ports of HP's step functions). Finger detection now gates on contact rows. Next: live enroll with swipes (§0).
 
 ---
 
@@ -42,23 +40,24 @@ has orientation coherence ~0.09 (pure noise) vs 0.87 for the HP-harvested print
 "enrolls + verifies through libfprint" claims are falsified (noise self-matches).
 See NOTES 2026-10-01 "CORRECTION".
 
-**Decode is cleared, and the sensor is fine.** Our decrypt+decode of HP's recorded
-swipe gives a clear print (coherence 0.90), and our live no-finger output is a clean
-blank background (line sd 4.2 after removing the fixed column pattern). The "every
-image is noise" problem is **`image::normalize`**: it subtracts the per-column mean
-over ALL rows, which erases a finger held still for the whole capture, then stretches
-the residue to full contrast. Use **swipes** (it is a swipe sensor; a held finger
-gives stripes at best). The `06 06`/`07 07` header bytes are just the PgaGain echo.
+**FIRST REAL PRINT FROM THE FULLY-OPEN PATH (2026-10-01):** a user **swipe**
+through `vfs495 capture` decodes to a clear fingerprint (loop core), ridge
+coherence 0.98 (HP's print 0.87–0.90, noise 0.09), 6258 contact rows (no finger: 0).
+Root causes of the earlier "all noise" images: press-and-hold on a swipe sensor, and
+`image::normalize` subtracting the per-column mean over ALL rows (erases a finger
+held still). Decode was always correct; `06 06`/`07 07` headers are the PgaGain echo.
 
-**New finger signal:** `Lines::contact_sd` / `contact_rows` (per-row sd after a
-per-column-MEDIAN background, cols 0..200). Offline: HP swipe 3924 contact rows
-(sd≥25), our no-finger 0 rows. Printed by `vfs495 decode`; not yet the daemon gate.
+**Gate replaced:** the daemon/`ridge-probe` now gate on **contact rows**
+(`--min-contact`, default 300; row sd ≥ 25 after a per-column-median background).
+Live: no finger 0 rows (that same capture had ridge_peak 2.51 — the old gate would
+have falsely fired). ridge_peak is printed as a diagnostic only. All prompts now say
+SWIPE.
 
-**NEXT ACTION (needs the user):** a live **swipe** through
-`vfs495 capture --out /tmp/swipe_new.bin` (swipe slowly ~1 s after the prompt, again
-~3 s later), then `vfs495 decode` → expect contact rows in the thousands and a
-coherent print. Then replace the ridge_peak gate with contact_rows, and fix
-`normalize`/`finger_segment` to use the median background.
+**NEXT ACTION:** live enroll + verify through libfprint with swipes
+(`scripts/live_enroll.py`, prompts updated to swipe; its timing was built for holds
+and may need adjusting). Watch: the swipe image is vertically stretched (no
+swipe-speed correction yet) — check libfprint accepts it. Optional cleanup:
+`normalize`/`finger_segment` should use the median background like `contact_sd`.
 
 **Sensor access note:** the udev rule is installed (`user:bine:rw-`); it survives
 re-enumeration. If the sensor gets wedged, a full power-off (not just reboot) clears

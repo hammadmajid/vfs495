@@ -46,17 +46,15 @@ enum Command {
         iters: usize,
     },
     /// Live diagnostic: fire a full imaging capture, decode it, and print the
-    /// finger-gate metrics (decoded rows, crop_ratio, ridge_peak, median line std)
-    /// plus the daemon's accept/reject verdict — WITHOUT gating, so both a
-    /// finger and a no-finger capture produce output. Run it once with a finger
-    /// held on the sensor and once with nothing on it, then compare `ridge_peak`
-    /// (finger ~1.8, blank noise ~1.1) and `crop_ratio` (finger low, blank high)
-    /// to confirm the ridge gate separates the two and to pick `--min-ridge`.
+    /// finger-gate metric (contact rows) plus diagnostics and the daemon's
+    /// accept/reject verdict — WITHOUT gating, so both a finger and a no-finger
+    /// capture produce output. SWIPE a finger when prompted (this is a swipe
+    /// sensor; a finger held still does not image).
     RidgeProbe {
-        /// Ridge peak-to-mean threshold to report a verdict against (matches the
-        /// daemon's --min-ridge). Accept iff crop_ratio <= 0.6 AND ridge_peak >= this.
-        #[arg(long, default_value_t = 1.4)]
-        min_ridge: f32,
+        /// Contact-row threshold to report a verdict against (matches the
+        /// daemon's --min-contact).
+        #[arg(long, default_value_t = DEFAULT_MIN_CONTACT)]
+        min_contact: usize,
         /// Also write the reconstructed image here for visual inspection.
         #[arg(long, default_value = "captures/ridge_probe.pgm")]
         out: PathBuf,
@@ -111,11 +109,11 @@ enum Command {
         /// Socket path (defaults to $FP_VIRTUAL_IMAGE).
         #[arg(long)]
         socket: Option<String>,
-        /// Minimum ridge spectral peak-to-mean to accept a capture as a finger.
-        /// This is the sole finger gate (measured live: finger ~2.1, blank noise
-        /// ~1.2; the default sits between). Raise it to reject marginal touches.
-        #[arg(long, default_value_t = 1.4)]
-        min_ridge: f32,
+        /// Minimum number of finger-contact rows (row sd >= 25 after removing the
+        /// fixed column pattern) to accept a capture as a finger. Measured live:
+        /// no finger 0, a swipe ~6000 (HP's recorded swipes ~3900).
+        #[arg(long, default_value_t = DEFAULT_MIN_CONTACT)]
+        min_contact: usize,
         /// Capture a single frame and feed it, then exit (for testing).
         #[arg(long)]
         once: bool,
@@ -154,7 +152,7 @@ fn main() -> Result<()> {
             capture::poll_probe(&mut dev, &mut rec, &cli.base, prefix, poll_idx, iters)?;
             println!("[+] poll-probe done");
         }
-        Command::RidgeProbe { min_ridge, out } => {
+        Command::RidgeProbe { min_contact, out } => {
             let mut dev = usb::Sensor::open()?;
             let mut rec = session::handshake(&dev, &cfg)?;
             // Fire the full imaging sequence (same path the daemon arms on a
@@ -171,17 +169,12 @@ fn main() -> Result<()> {
             if lines.rows == 0 {
                 bail!("no lines decoded — capture produced no frames");
             }
-            let line_std = lines.median_line_std();
+            let (verdict, contact) = finger_gate(&lines, min_contact);
             let (px, w, h) = image::reconstruct(&lines, true);
-            let crop_ratio = h as f32 / lines.rows as f32;
             let ridge = image::ridge_peak(&px, w, h);
-            // Mirror capture_frame's gate exactly: rows>=60 AND ridge>=min_ridge on
-            // the FULL image (crop_ratio is diagnostic only, not part of the gate).
-            let verdict = lines.rows >= 60 && ridge >= min_ridge;
             println!("[i] reconstructed image: {w}x{h}");
-            println!("[i]   median_line_std = {line_std:.1}   (noise and finger both high; not a gate)");
-            println!("[i]   crop_ratio      = {crop_ratio:.3}  (diagnostic only, NOT gated)");
-            println!("[i]   ridge_peak      = {ridge:.2}   (THE gate — finger ~2.1, blank noise ~1.2-1.6; gate >= {min_ridge})");
+            println!("[i]   contact rows = {contact}   (THE gate — no finger 0, swipe thousands; gate >= {min_contact})");
+            println!("[i]   ridge_peak   = {ridge:.2}   (diagnostic only — NOT a finger signal)");
             println!(
                 "[{}] daemon verdict: {}",
                 if verdict { "+" } else { "-" },
@@ -242,12 +235,26 @@ fn main() -> Result<()> {
             virtimage::send_image(&sock, &fpx, fw as u32, fh as u32)?;
             println!("[+] captured {w}x{h} and fed {fw}x{fh} to virtual_image");
         }
-        Command::Daemon { socket, min_ridge, once, gap } => {
+        Command::Daemon { socket, min_contact, once, gap } => {
             let sock = resolve_socket(socket)?;
-            run_daemon(&cli.base, &cfg, &sock, min_ridge, once, gap)?;
+            run_daemon(&cli.base, &cfg, &sock, min_contact, once, gap)?;
         }
     }
     Ok(())
+}
+
+/// Default `--min-contact`: well above a blank sensor (0) and far below a swipe
+/// (~4000-6000 rows), so partial swipes still pass.
+const DEFAULT_MIN_CONTACT: usize = 300;
+/// Row sd (after removing the fixed column pattern) that counts as contact:
+/// a blank sensor is ~4-10, a finger's rows ~25-60.
+const CONTACT_SD: f32 = 25.0;
+
+/// The finger gate: enough decoded lines and at least `min_contact` rows with
+/// real finger contact (see `Lines::contact_sd`). Returns (accept, contact rows).
+fn finger_gate(lines: &image::Lines, min_contact: usize) -> (bool, usize) {
+    let contact = lines.contact_rows(CONTACT_SD);
+    (lines.rows >= 60 && contact >= min_contact, contact)
 }
 
 /// Capture one frame from the sensor and decode it to a reconstructed image,
@@ -263,7 +270,7 @@ fn capture_frame(
     base: &std::path::Path,
     cfg: &session::Config,
     dli: &image::DliConfig,
-    min_ridge: f32,
+    min_contact: usize,
 ) -> Result<Option<(Vec<u8>, u32, u32)>> {
     // Fire the full imaging capture. The WOE poll gate (poll seq[17] and watch for
     // reply divergence) was falsified on hardware — that poll is finger-blind, so
@@ -276,23 +283,18 @@ fn capture_frame(
         log::debug!("skip: no finger (only {} decoded lines)", lines.rows);
         return Ok(None);
     }
-    let (px, w, h) = image::reconstruct(&lines, true);
-    // The sensor streams high-variance noise even with no finger, so neither
-    // contrast nor the segmentation crop-ratio can gate (measured live: a held
-    // finger leaves crop_ratio near 1.0, same as noise). The reliable finger
-    // signal is the ridge spectral peak-to-mean. Compute it on the FULL image —
-    // it is window-size dependent, so it must not be measured on the clamped feed
-    // window (that inflates noise above the threshold). crop_ratio is diagnostic.
-    let crop_ratio = h as f32 / lines.rows as f32;
-    let pk = image::ridge_peak(&px, w, h);
-    if pk < min_ridge {
-        log::debug!("skip: no finger (ridge_peak {pk:.2} < {min_ridge:.2}, crop_ratio {crop_ratio:.2})");
+    // Gate on finger contact rows: with the fixed column pattern removed, a blank
+    // sensor is quiet (row sd ~4) and a swiped finger's rows are ~25-60. (The old
+    // ridge_peak gate measured noise statistics, not ridges — NOTES 2026-10-01.)
+    let (accept, contact) = finger_gate(&lines, min_contact);
+    if !accept {
+        log::debug!("skip: no finger ({contact} contact rows < {min_contact})");
         return Ok(None);
     }
-    // Passed the gate: clamp the pixels we actually feed to a libfprint-acceptable
-    // height (a held finger stacks thousands of near-identical lines).
+    let (px, w, h) = image::reconstruct(&lines, true);
+    // Clamp the pixels we actually feed to a libfprint-acceptable height.
     let (fpx, fw, fh) = image::window_for_feed(&px, w, h);
-    log::info!("finger captured: {w}x{h} (ridge_peak {pk:.2}, crop_ratio {crop_ratio:.2}); feeding {fw}x{fh}");
+    log::info!("finger captured: {w}x{h} ({contact} contact rows); feeding {fw}x{fh}");
     Ok(Some((fpx, fw as u32, fh as u32)))
 }
 
@@ -316,20 +318,20 @@ fn run_daemon(
     base: &std::path::Path,
     cfg: &session::Config,
     sock: &str,
-    min_ridge: f32,
+    min_contact: usize,
     once: bool,
     gap: u64,
 ) -> Result<()> {
     // Suppress the interactive capture prompt; the host UI drives the user.
     std::env::set_var("VFS_NO_PROMPT", "1");
     let dli = image::DliConfig::load_main(base)?;
-    log::info!("vfs495 feeder daemon: socket {sock}, min_ridge {min_ridge}");
-    log::info!("waiting for finger touches (press and hold when your desktop asks to scan)");
+    log::info!("vfs495 feeder daemon: socket {sock}, min_contact {min_contact}");
+    log::info!("waiting for finger touches (swipe your finger across the sensor when your desktop asks to scan)");
 
     let mut dev = usb::Sensor::open()?;
     let mut rec = session::handshake(&dev, cfg)?;
     loop {
-        match capture_frame(&mut dev, &mut rec, base, cfg, &dli, min_ridge) {
+        match capture_frame(&mut dev, &mut rec, base, cfg, &dli, min_contact) {
             Ok(Some((px, w, h))) => match virtimage::send_image(sock, &px, w, h) {
                 Ok(()) => log::info!("fed {w}x{h} image to virtual_image"),
                 Err(e) => log::warn!(

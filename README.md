@@ -118,7 +118,7 @@ vfs495 run --socket "$FP_VIRTUAL_IMAGE"
 #    captures on each finger touch, skips empty cycles, pushes images to the socket.
 sudo -E FP_VIRTUAL_IMAGE="$FP_VIRTUAL_IMAGE" vfs495 daemon
 #    --once     capture one frame and exit (testing)
-#    --min-ridge 1.4   finger-detection threshold (ridge spectral peak/mean)
+#    --min-contact 300 finger-detection threshold (rows with finger contact)
 ```
 
 ### GNOME / fprintd integration (feeder daemon)
@@ -143,16 +143,19 @@ Environment=FP_VIRTUAL_IMAGE=/run/vfs495.sock
 ```sh
 sudo systemctl daemon-reload && sudo systemctl restart fprintd
 sudo -E FP_VIRTUAL_IMAGE=/run/vfs495.sock vfs495 daemon      # leave running
-fprintd-enroll        # then press & hold when prompted (five stages)
+fprintd-enroll        # then SWIPE your finger slowly across the sensor when prompted (five stages)
 fprintd-verify
 ```
 
-Finger presence is decided from the decoded image's **ridge spectral peak-to-mean**
-(`--min-ridge`, default 1.4). Each cycle the daemon fires a full imaging capture,
-decodes it, and feeds it only if the ridge peak clears the threshold. Measured live:
-a held finger scores ~2.1, blank sensor noise ~1.2, so the default cleanly
-separates them. Use `vfs495 ridge-probe` to measure and retune on your hardware
-(it prints the metrics and the accept/reject verdict for a capture without gating).
+**This is a swipe sensor: slide your finger slowly down across it (1–2 s). A
+finger held still does not produce a fingerprint image.**
+
+Finger presence is decided by **contact rows**: rows of the decoded capture whose
+spread, after removing the sensor's fixed column pattern, shows real skin contact
+(`--min-contact`, default 300). Measured live: a blank sensor gives 0 contact rows,
+a swipe ~6000. Each cycle the daemon fires a full imaging capture, decodes it, and
+feeds it only if it clears the threshold. `vfs495 ridge-probe` prints the count and
+the accept/reject verdict for one capture without gating (it prompts you to swipe).
 
 Every capture session runs the sensor's AFE calibration itself: the open driver
 computes the sweep results (PgaOffset, Adc, PgaGain) from its own calibration

@@ -79,13 +79,13 @@ def main():
             target = state["done"] + 1
             if target > stages:
                 break
-            banner([f"PRESS AND HOLD YOUR FINGER NOW", f"STAGE {target} OF {stages}",
-                    "KEEP HOLDING ~25s UNTIL IT SAYS LIFT"])
+            banner([f"SWIPE YOUR FINGER NOW (slowly, downward, 1-2 s)", f"STAGE {target} OF {stages}",
+                    "SWIPE AGAIN ~3 s LATER; DO NOT HOLD STILL"])
             if not one_capture():
-                banner(["CAPTURE MISSED — wait for next PRESS prompt, press FIRMLY"])
+                banner(["CAPTURE MISSED — wait for the next SWIPE prompt"])
                 attempts += 1; time.sleep(6); continue
             if stage_event.wait(timeout=20):
-                stage_event.clear(); banner(["LIFT YOUR FINGER NOW"]); time.sleep(5.0)
+                stage_event.clear(); banner(["DONE — wait for the next SWIPE prompt"]); time.sleep(5.0)
             attempts += 1
 
     banner(["LIVE ENROLL — follow the big prompts, same finger"])
@@ -101,7 +101,7 @@ def main():
         print(f"\n[!] ENROLL FAILED: {e.message}"); dev.close_sync(); return 2
     ft.join(timeout=5)
 
-    banner(["ENROLL DONE! NOW VERIFY", "PRESS AND HOLD THE SAME FINGER ONCE"])
+    banner(["ENROLL DONE! NOW VERIFY", "SWIPE THE SAME FINGER (slowly, downward)"])
     vdone = {"v": False}
     def vfeeder():
         for _ in range(3):
@@ -109,7 +109,7 @@ def main():
                 return
             if one_capture():
                 return
-            banner(["VERIFY CAPTURE MISSED — press firmly, hold"]); time.sleep(2)
+            banner(["VERIFY CAPTURE MISSED — swipe again, slowly"]); time.sleep(2)
     threading.Thread(target=vfeeder, daemon=True).start()
     ok = False
     try:
