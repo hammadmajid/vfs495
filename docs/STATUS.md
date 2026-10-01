@@ -5,14 +5,16 @@ engineering of HP's binary, and the current state of the open driver. For the
 chronological, dated reasoning and evidence behind every claim here, see
 [`../NOTES.md`](../NOTES.md). For build and usage, see [`../README.md`](../README.md).
 
-Status as of 2026-10-01: **the full open capture path — secure session, transport,
-image decryption, decode, and reconstruction — runs in open Rust with no HP code
-and is live-confirmed on hardware.** A feeder daemon bridges it to libfprint for
-GNOME/fprintd. A real live capture enrolls + verifies through libfprint. The one
+Status as of 2026-10-01: **the open secure session, transport, EP2 image decryption
+and per-session calibration run in open Rust with no HP code, live on hardware.**
+A feeder daemon bridges to libfprint for GNOME/fprintd. **However, no open-path
+image has yet contained a real fingerprint** (corrected session 10: earlier
+"real print" / "enrolls + verifies" claims were noise self-matching). The
 former blocker — the no-finger ridge baseline drifting into the finger range — is
 fixed (session 10): calibration is now computed per session from our own sweep
-frames (open ports of HP's step functions). Remaining: re-confirm the finger-side
-ridge value live, then live enroll (see §0).
+frames (open ports of HP's step functions). BUT (corrected session 10) no open-path
+image has yet shown real ridges — the decode/capture of the finger itself is the
+new blocker (see §0).
 
 ---
 
@@ -32,11 +34,19 @@ Two bugs fixed on the way:
   a scoped thread for the whole reply wait; sweep frames arrive gap-free.
 - **Stale calibration replay** (the drift root cause, see NOTES 2026-10-01).
 
-**NEXT ACTION (needs a person at the sensor):** re-measure a **held finger** with
-`vfs495 ridge-probe` — the old ~2.1 finger figure was measured with stale
-calibration and a gappy stream, so the finger value (and the `--min-ridge 1.4`
-default) must be re-confirmed. Then the live daemon enroll (`scripts/live_enroll.py`)
-and the fprintd systemd drop-in (user opt-in).
+**MAJOR CORRECTION (session 10, after the user's finger test):** the fully-open
+path has **never produced a real fingerprint image**. Finger held → ridge_peak 1.42
+(marginal), and objectively every open-path image — old "finger" captures included —
+has orientation coherence ~0.09 (pure noise) vs 0.87 for the HP-harvested print
+(`captures/fingerprint_open.png`). So the earlier "real print", "finger ~2.1", and
+"enrolls + verifies through libfprint" claims are falsified (noise self-matches).
+See NOTES 2026-10-01 "CORRECTION".
+
+**NEXT ACTION:** decide decode-vs-capture: run our decrypt+decode on HP's own
+recorded swipe (`captures/getprint_trace.usblog` + `plaintext_cmds.txt`). Real print
+⇒ decode is fine and the live drive isn't imaging the finger; noise ⇒ find the faulty
+decode stage (compare against HP-harvested UnpackLineRT lines). The ridge gate and
+live enroll are on hold until a real print comes out of the open path.
 
 **Sensor access note:** the udev rule is installed (`user:bine:rw-`); it survives
 re-enumeration. If the sensor gets wedged, a full power-off (not just reboot) clears

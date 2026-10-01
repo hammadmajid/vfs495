@@ -1391,3 +1391,23 @@ ridge_peak 1.16 1.07 1.10 1.25 1.13 1.13 1.17 (stale replay: 1.6-2.7). No-finger
 baseline is back to fresh-sensor level and stable across sessions.
 Open: finger-side ridge_peak must be re-measured on the fixed path (old ~2.1 came
 from stale calibration + gappy stream) before trusting --min-ridge 1.4.
+
+### *** CORRECTION: the fully-open path has never produced a real fingerprint image ***
+User held a finger for `ridge-probe` on the fixed path: ridge_peak **1.42** (no-finger
+1.07-1.25) — marginal. Visual check + an objective measure (median 32x32-block
+orientation coherence, gradient structure tensor after blur sigma 1):
+- captures/fingerprint_open.png (HP-RAM-harvested lines, 2026-09-26): **0.87** — real ridges
+- captures/ridge_finger.pgm (open path, finger held, 2026-09-28): 0.08
+- /tmp/finger.pgm (open path, finger held, today, fixed calib + EP2): 0.09
+- no-finger open captures (old and new): 0.09
+=> Every fully-open image, with or without a finger, is noise. FALSIFIED, with this
+evidence: "264x623 / 264x7845 real print" (session 5/5b), "ridge_peak finger 2.1 vs
+noise 1.2" as a finger detector (it separated noise statistics, likely the stale-
+calibration drift itself), and "our live capture enrolls + verifies through
+libfprint" (session 8) — enrolling noise and verifying the same noise image against
+itself proves nothing; NBIS finds "minutiae" in noise.
+Still valid: open session/transport, EP2 AES decrypt mechanism (headers parse),
+today's calibration port + EP2 line-drop fix (verified against HP frames directly).
+Open question being tested offline: is our DECODE wrong, or is the live CAPTURE not
+imaging the finger? Test = run our decrypt+decode on HP's own recorded swipe
+(getprint_trace.usblog + its plaintext commands).
