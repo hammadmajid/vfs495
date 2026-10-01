@@ -42,18 +42,23 @@ has orientation coherence ~0.09 (pure noise) vs 0.87 for the HP-harvested print
 "enrolls + verifies through libfprint" claims are falsified (noise self-matches).
 See NOTES 2026-10-01 "CORRECTION".
 
-**Decode is cleared:** our decrypt+decode of HP's recorded swipe
-(`capture_swipe.usblog` + `plaintext_cmds.txt`) gives a clear print (coherence 0.90).
-The fault is the live capture. Our commands are byte-identical to that HP run; the
-frame-header `06 06`/`07 07` difference is just the PgaGain value echoed (not a
-finger flag). Prime suspect: HP's print was a **swipe**; all our finger tests since
-session 5b were press-and-hold on a swipe sensor.
+**Decode is cleared, and the sensor is fine.** Our decrypt+decode of HP's recorded
+swipe gives a clear print (coherence 0.90), and our live no-finger output is a clean
+blank background (line sd 4.2 after removing the fixed column pattern). The "every
+image is noise" problem is **`image::normalize`**: it subtracts the per-column mean
+over ALL rows, which erases a finger held still for the whole capture, then stretches
+the residue to full contrast. Use **swipes** (it is a swipe sensor; a held finger
+gives stripes at best). The `06 06`/`07 07` header bytes are just the PgaGain echo.
 
-**NEXT ACTION (needs the user):** swipe through `vfs495 capture --out /tmp/swipe_new.bin`
-(swipe slowly ~1 s after the prompt, again ~3 s later), then decode and judge by
-orientation coherence (real print ≳0.7, noise ≈0.09). If a swipe gives a print, the
-detector/enroll flow must be redesigned around swipes; if not, compare our live drive
-with HP's run (poll-loop timing before the 0x17/0x04 latch).
+**New finger signal:** `Lines::contact_sd` / `contact_rows` (per-row sd after a
+per-column-MEDIAN background, cols 0..200). Offline: HP swipe 3924 contact rows
+(sd≥25), our no-finger 0 rows. Printed by `vfs495 decode`; not yet the daemon gate.
+
+**NEXT ACTION (needs the user):** a live **swipe** through
+`vfs495 capture --out /tmp/swipe_new.bin` (swipe slowly ~1 s after the prompt, again
+~3 s later), then `vfs495 decode` → expect contact rows in the thousands and a
+coherent print. Then replace the ridge_peak gate with contact_rows, and fix
+`normalize`/`finger_segment` to use the median background.
 
 **Sensor access note:** the udev rule is installed (`user:bine:rw-`); it survives
 re-enumeration. If the sensor gets wedged, a full power-off (not just reboot) clears

@@ -1444,3 +1444,22 @@ images are noise. Remaining prime suspect: HP's good image was a SWIPE; every
 open-path finger test since session 5b was press-and-hold on a swipe sensor (5b's
 swipe through our driver scored spectral peak 5.15 but was never visually checked).
 Next: a user swipe through `vfs495 capture`, judged by orientation coherence.
+
+### ROOT CAUSE of "every open image is noise": reconstruct erases a held finger
+Same minimal processing (perm, stack, subtract fixed column pattern) on HP's swipe vs
+our no-finger capture: HP finger chunks line-sd ~44-60 / coherence 0.8-0.97; HP
+finger-free chunks ~10 / 0.15-0.2; OURS no-finger **4.2** / 0.09 — a clean, quiet
+blank background, exactly as it should be. The sensor under our drive is fine.
+The "noise" was processing: image::normalize subtracts each column's mean over ALL
+rows, so a finger held still for the whole capture IS the column pattern and is
+subtracted away; the local-contrast step then stretches the ~4-sd background to full
+contrast, making every held-finger image look like no-finger noise. finger_segment
+uses the same column mean (blind to a held finger). Also explains "contrast fails as
+a gate": raw per-row sd (~48) is the column pattern, not contact. A held finger on a
+swipe sensor would anyway give vertical stripes, not a print: use SWIPES.
+
+### New finger signal: contact sd (Lines::contact_sd / contact_rows)
+Per-row std after subtracting the per-column MEDIAN background, cols 0..200.
+Offline: HP swipe bursts 3924 / 3857 contact rows (sd>=25), p90 ~61; our no-finger
+captures 0 rows, p90 4.6 (calibrated) / 6.6 (stale). Printed by `vfs495 decode`.
+Not yet wired into the daemon gate — needs a live swipe through our driver first.

@@ -198,6 +198,14 @@ fn main() -> Result<()> {
             if lines.rows < 20 {
                 bail!("too few lines ({}) — not a usable swipe", lines.rows);
             }
+            let mut sd = lines.contact_sd();
+            sd.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            if let (Some(lo), Some(hi)) = (sd.get(sd.len() / 10), sd.get(sd.len() * 9 / 10)) {
+                println!(
+                    "[i] contact sd p10={lo:.1} p90={hi:.1}; rows with contact (sd>=25): {}",
+                    lines.contact_rows(25.0)
+                );
+            }
             let (px, w, h) = image::reconstruct(&lines, !no_crop);
             image::write_pgm(out.to_str().unwrap(), &px, w, h)?;
             println!("[+] wrote {} ({}x{})", out.display(), w, h);

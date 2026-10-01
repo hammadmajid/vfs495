@@ -167,7 +167,47 @@ impl Lines {
         sds.sort_by(|a, b| a.partial_cmp(b).unwrap());
         sds[sds.len() / 2]
     }
+
+    /// Per-row contact strength: the std of each row after subtracting the
+    /// sensor's fixed column pattern, over the main sensing columns.
+    ///
+    /// The raw per-row std is dominated by the fixed column pattern (~48 with or
+    /// without a finger), which is why contrast looked useless as a finger
+    /// signal. With the pattern removed, a blank sensor is ~4–10 while a swiped
+    /// finger's rows are ~45–60 (HP's recorded swipe; NOTES.md 2026-10-01). The
+    /// pattern is estimated as the per-column MEDIAN over the capture, which is
+    /// the background as long as a finger covers under half of the rows — true
+    /// for a swipe, not for a finger held still for the whole capture.
+    pub fn contact_sd(&self) -> Vec<f32> {
+        let cols = self.cols.min(CONTACT_COLS);
+        if self.rows == 0 || cols == 0 {
+            return Vec::new();
+        }
+        let bg: Vec<f32> = (0..cols)
+            .map(|x| {
+                let mut col: Vec<f32> = (0..self.rows).map(|y| self.data[y * self.cols + x]).collect();
+                col.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                col[col.len() / 2]
+            })
+            .collect();
+        (0..self.rows)
+            .map(|y| {
+                let row = &self.data[y * self.cols..y * self.cols + cols];
+                let d: Vec<f32> = row.iter().zip(&bg).map(|(v, b)| v - b).collect();
+                let mean = d.iter().sum::<f32>() / cols as f32;
+                (d.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / cols as f32).sqrt()
+            })
+            .collect()
+    }
+
+    /// Number of rows whose [`contact_sd`](Self::contact_sd) reaches `min_sd`.
+    pub fn contact_rows(&self, min_sd: f32) -> usize {
+        self.contact_sd().iter().filter(|&&s| s >= min_sd).count()
+    }
 }
+
+/// Main sensing columns (the right-hand columns carry fixed calibration bars).
+const CONTACT_COLS: usize = 200;
 
 /// Parse a `lines.raw`-format buffer: repeated `<u16 LE width><width bytes>`
 /// (the descrambled output of [`unpack_line`] / HP's UnpackLineRT).
