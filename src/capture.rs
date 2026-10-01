@@ -487,7 +487,12 @@ pub fn arm_capture(
             }
             // Calibration sweep frames arrive in the clear: compute this step's
             // result and carry it into the remaining commands (see calib.rs).
-            if let Some(applied) = crate::calib::carry_forward(i, slice, &mut seq[i + 1..]) {
+            // VFS_NO_CALIB replays the recorded values instead (A/B diagnostic).
+            let calib = std::env::var("VFS_NO_CALIB").is_err();
+            if let Some(applied) = calib
+                .then(|| crate::calib::carry_forward(i, slice, &mut seq[i + 1..]))
+                .flatten()
+            {
                 log::info!("[{i:3}]   calibration: {applied}");
             }
             // Decrypt this command's EP2 slice under the active image key, chaining

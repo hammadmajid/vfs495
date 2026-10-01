@@ -1431,3 +1431,16 @@ all `0707`. Session 5b's /tmp/swipe.bin (a user SWIPE through our driver) was al
 type byte reflects sensor-side finger state/mode (06 = no finger, 07 = finger), and
 the VFS495 being a SWIPE sensor, our "press and hold" tests never gave it a moving
 finger. Next: user swipe through `vfs495 capture`, check frame types + coherence.
+
+### Frame-type lead RESOLVED (falsified as a finger/mode signal)
+HP's swipe run is `0707` in EVERY read — polls before the swipe (cmd 27/32), imaging
+(33/37) and after (51) — so it is not a finger flag. Our in-session commands are
+byte-identical to that HP run (capture_seq == plaintext_cmds idx 10..; init seq
+matches). Imaging-frame header bytes 4-5 are the **PgaGain channel values echoed**
+(calibration frames likewise carry the swept value in byte 4): `VFS_NO_CALIB=1`
+(new A/B switch: replay recorded values) -> all `0707` (stale PgaGain 7); computed
+calibration -> all `0606` (PgaGain 6). So 0606/0707 is a gain echo, not why our
+images are noise. Remaining prime suspect: HP's good image was a SWIPE; every
+open-path finger test since session 5b was press-and-hold on a swipe sensor (5b's
+swipe through our driver scored spectral peak 5.15 but was never visually checked).
+Next: a user swipe through `vfs495 capture`, judged by orientation coherence.

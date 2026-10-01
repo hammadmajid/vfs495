@@ -42,11 +42,18 @@ has orientation coherence ~0.09 (pure noise) vs 0.87 for the HP-harvested print
 "enrolls + verifies through libfprint" claims are falsified (noise self-matches).
 See NOTES 2026-10-01 "CORRECTION".
 
-**NEXT ACTION:** decide decode-vs-capture: run our decrypt+decode on HP's own
-recorded swipe (`captures/getprint_trace.usblog` + `plaintext_cmds.txt`). Real print
-⇒ decode is fine and the live drive isn't imaging the finger; noise ⇒ find the faulty
-decode stage (compare against HP-harvested UnpackLineRT lines). The ridge gate and
-live enroll are on hold until a real print comes out of the open path.
+**Decode is cleared:** our decrypt+decode of HP's recorded swipe
+(`capture_swipe.usblog` + `plaintext_cmds.txt`) gives a clear print (coherence 0.90).
+The fault is the live capture. Our commands are byte-identical to that HP run; the
+frame-header `06 06`/`07 07` difference is just the PgaGain value echoed (not a
+finger flag). Prime suspect: HP's print was a **swipe**; all our finger tests since
+session 5b were press-and-hold on a swipe sensor.
+
+**NEXT ACTION (needs the user):** swipe through `vfs495 capture --out /tmp/swipe_new.bin`
+(swipe slowly ~1 s after the prompt, again ~3 s later), then decode and judge by
+orientation coherence (real print ≳0.7, noise ≈0.09). If a swipe gives a print, the
+detector/enroll flow must be redesigned around swipes; if not, compare our live drive
+with HP's run (poll-loop timing before the 0x17/0x04 latch).
 
 **Sensor access note:** the udev rule is installed (`user:bine:rw-`); it survives
 re-enumeration. If the sensor gets wedged, a full power-off (not just reboot) clears
@@ -353,6 +360,7 @@ libfprint-acceptable, minutiae-friendly image. (A swipe assembles to a few-hundr
 `VFS_NO_PROMPT` (suppress capture prompt), `VFS_SWIPE_AT` (finger-cue index),
 `VFS_SKIP_17`, `VFS_NO_REHANDSHAKE`, `VFS_REOPEN_SETCONFIG`, `VFS_HP_RESUME`,
 `VFS_DUMP_SLICES=<dir>` (write each command's raw EP2 slice as `NN_raw.bin`;
-calibration sweep frames are idx 6..12, plaintext).
+calibration sweep frames are idx 6..12, plaintext), `VFS_NO_CALIB` (replay the
+recorded calibration values instead of computing them — A/B diagnostic).
 Most are leftovers from the re-enumeration investigation and are inert on the
 happy path; kept for regression probing.
