@@ -1517,3 +1517,14 @@ User feedback: too much text to read while acting; Ctrl+C did not stop live_enro
   now waits 3 s + until the sensor is stably on the bus, and retries USB errors
   silently; only a real miss (no finger / no swipe motion) shows ✗. Dry run with no
   finger: every round shows the full cue sequence and ends ✗, as expected.
+
+### 2026-10-02 — FIRST LIVE ENROLL: 5/5 stages accepted from 5 real swipes; verify FAIL (unreliable run)
+User ran live_enroll.py: all 5 enroll stages accepted (libfprint extracted minutiae
+from 5 separate live swipes). Verify returned no-match, but that run is not
+trustworthy: a harness bug started an extra enroll capture ("round 6/5") concurrently
+with the verify capture, so two sessions fought over the sensor (verify capture
+showed ✗) and it is unknown which image verify got. Fixed: the enroll loop stops at
+5/5 and is joined before verify. Also: every fed image is now saved
+(`VFS_SAVE_FED=<dir>` in `vfs495 run`; the harness uses its temp dir and prints it)
+so matching can be analysed offline; the benign virtual_image "Got empty data"
+warning (our sender closing the socket) is silenced.

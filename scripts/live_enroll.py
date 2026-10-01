@@ -16,8 +16,10 @@ import os, signal, subprocess, sys, tempfile, threading, time
 # which shares the terminal's process group) immediately.
 signal.signal(signal.SIGINT, signal.SIG_DFL)
 
-SOCK = os.path.join(tempfile.mkdtemp(prefix="vfs_live_"), f"vimg_{os.getpid()}.sock")
+RUN_DIR = tempfile.mkdtemp(prefix="vfs_live_")
+SOCK = os.path.join(RUN_DIR, f"vimg_{os.getpid()}.sock")
 os.environ["FP_VIRTUAL_IMAGE"] = SOCK
+os.environ["VFS_SAVE_FED"] = RUN_DIR   # every fed image is kept here (biometric; local only)
 
 RED, GREEN, YELLOW, DIM, RESET = "\x1b[1;30;41m", "\x1b[1;30;42m", "\x1b[1;30;43m", "\x1b[2m", "\x1b[0m"
 CUES = {"DON'T TOUCH": (RED, "  DON'T TOUCH  "), "SWIPE": (GREEN, "  SWIPE  ↓  "),
@@ -70,6 +72,8 @@ def one_capture():
 import gi
 gi.require_version("FPrint", "2.0")
 from gi.repository import FPrint, GLib
+# virtual_image logs a harmless warning each time our sender closes the socket.
+GLib.log_set_handler("libfprint-virtual_image", GLib.LogLevelFlags.LEVEL_WARNING, lambda *a: None, None)
 
 def main():
     ctx = FPrint.Context.new(); ctx.enumerate()
@@ -87,7 +91,7 @@ def main():
 
     def feeder():
         tries = 0
-        while not state["finished"] and tries < stages * 3:
+        while not state["finished"] and state["done"] < stages and tries < stages * 3:
             note(f"\nround {state['done'] + 1}/{stages}")
             before = state["done"]
             if one_capture() and accepted.wait(timeout=20):
@@ -97,7 +101,7 @@ def main():
                   flush=True)
             tries += 1
 
-    threading.Thread(target=feeder, daemon=True).start()
+    ft = threading.Thread(target=feeder, daemon=True); ft.start()
     try:
         tmpl = FPrint.Print.new(dev); tmpl.set_finger(FPrint.Finger.RIGHT_INDEX)
         enrolled = dev.enroll_sync(tmpl, None, progress, None)
@@ -105,7 +109,7 @@ def main():
         state["finished"] = True
         say(RED, f"  ENROLL FAILED: {e.message}  "); dev.close_sync(); return 2
     state["finished"] = True
-    time.sleep(1)
+    ft.join()   # never overlap a leftover enroll capture with the verify capture
 
     note("\nverify: same finger")
     done = {"v": False}
@@ -123,6 +127,7 @@ def main():
     done["v"] = True
     dev.close_sync()
     say(GREEN if ok else RED, "  RESULT: PASS (match)  " if ok else "  RESULT: FAIL (no match)  ")
+    note(f"images: {RUN_DIR}")
     return 0 if ok else 3
 
 if __name__ == "__main__":
