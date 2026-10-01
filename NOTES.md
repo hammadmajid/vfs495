@@ -1350,3 +1350,44 @@ Each matches where the value first appears in the next sweep command. Our replay
 headers/sizes; only sample noise differs), so the port can run on our own frames.
 Adc varies run to run (129-133), so the session must compute it, not cache it.
 Now RE-ing the Adc/PgaOffset/PgaGain step algorithms against these 5 runs.
+
+### Step algorithms RE'd (3 parallel agents; all verified vs 5 HP runs + HP internals)
+All three steps use the same frame shape: 0xd0-byte lines (8-byte header `01 fe`,
+u16 LE counter from 1, sweep value at byte 4; last line `01 01` end marker, its
+samples still counted). Column sums per sweep value, split into even-offset (A) and
+odd-offset (B) columns (interleave width 1).
+- **PgaOffset** (@0x50e010): 256 lines, 1 per value 0..255 of reg 0x300420c8; S(v) =
+  sum of cols 50..199 (blob flcn_caled60b0+4). Result = argmin |S(v) - 127*150|
+  (first wins). Limits 0..30 / 128..158 only set an error status. The ramp falls
+  ~1-2 counts/step near target, so a ~1 count/pixel offset shift flips 5<->4 (the
+  old recording's 4). Matched HP's 256 internal sums exactly.
+- **Adc** (@0x50d9e0): 60 lines, 2 per value 107..136; cols 125..150. Result = value
+  with the largest A or B (first strict max). B dominates and is nearly flat
+  (winner leads by 1-9 counts), hence HP's 129-133 run-to-run spread — it is
+  essentially noise-limited. Limits 116..136 (gCalAdcLimits @0x572324).
+- **PgaGain** (@0x50d110): 32 lines, 2 per value 0..15; cols 158..187. A rises to
+  saturation, B falls. D = 2*10*15 = 300 (10 counts/pixel). First row i with
+  A_i >= A_last - D; result = value(i-1). Same value written to both channel regs
+  (0x30042120/0x30042160). Matched HP's internal record table.
+None reads an earlier step's result; dependence is only through the frame (the
+sweep command carries the earlier values — hence carrying them forward matters).
+
+### BUG: our EP2 path dropped ~27 lines per gap (FIXED)
+The agents found our sweep frames had line-counter jumps (14->41, 92->121, ...) that
+HP would reject (error 0x11). Not rusb (read_bulk returns partial data on timeout):
+read_reply_interleaved alternated 20 ms EP1 waits with 20 ms EP2 reads, and the
+sensor's EP2 FIFO (~14 lines) overflowed during each EP1 wait. Fix: a scoped thread
+reads EP2 continuously while the main thread waits on EP1 (HP also reads EP2 on its
+own thread). After the fix all 7 sweep frames are gap-free. This also affected the
+imaging stream (previous images were assembled from gappy data).
+
+### Per-session calibration LIVE (src/calib.rs) — drift FIXED
+arm_capture now, after each sweep command's EP2 slice (idx 7/8/11), validates the
+frame (consecutive counters + end marker; else keep recorded value + warn), computes
+the step result and patches it into every later command (override = last of >=2
+register writes; Adc type-5 entry). 47 sites, same as the empirical diff.
+Live, no finger, 7 sessions: PgaOffset=5, Adc=130/133/132/130/132/132/131, PgaGain=6,
+ridge_peak 1.16 1.07 1.10 1.25 1.13 1.13 1.17 (stale replay: 1.6-2.7). No-finger
+baseline is back to fresh-sensor level and stable across sessions.
+Open: finger-side ridge_peak must be re-measured on the fixed path (old ~2.1 came
+from stale calibration + gappy stream) before trusting --min-ridge 1.4.

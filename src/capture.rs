@@ -273,9 +273,12 @@ fn send_cmd_draining(
     Some((payload, last_status))
 }
 
-/// Wait up to `timeout_ms` for one EP1 record. With an EP2 sink, poll EP1 in
-/// short slices and pull any pending image chunk between slices so the stream
-/// never backs up; without one, this is a plain `read_record`.
+/// Wait up to `timeout_ms` for one EP1 record. With an EP2 sink, a scoped thread
+/// reads EP2 continuously for the whole wait (as HP's driver does). Alternating
+/// EP1/EP2 waits on one thread is NOT enough: the sensor's EP2 FIFO holds only
+/// ~14 lines, so each 20 ms spent waiting on EP1 overflowed it and the sensor
+/// dropped ~27 lines, corrupting every calibration sweep frame (NOTES.md
+/// 2026-10-01). Without a sink, this is a plain `read_record`.
 fn read_reply_interleaved(
     dev: &Sensor,
     timeout_ms: u64,
@@ -284,19 +287,20 @@ fn read_reply_interleaved(
     let Some(img) = img else {
         return dev.read_record(timeout_ms);
     };
-    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-    loop {
-        // Short first-byte wait; once a record starts, allow it to complete.
-        match dev.read_record_split(20, 2000) {
-            Ok(wire) => return Ok(wire),
-            Err(e) if Instant::now() >= deadline => return Err(e),
-            Err(_) => {}
-        }
-        let chunk = dev.read_image(EP2_CHUNK, 20);
-        if !chunk.is_empty() {
-            img.extend_from_slice(&chunk);
-        }
-    }
+    let done = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|s| {
+        let reader = s.spawn(|| {
+            let mut got = Vec::new();
+            while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                got.extend_from_slice(&dev.read_image(EP2_CHUNK, 20));
+            }
+            got
+        });
+        let reply = dev.read_record(timeout_ms);
+        done.store(true, std::sync::atomic::Ordering::Relaxed);
+        img.extend_from_slice(&reader.join().expect("EP2 reader panicked"));
+        reply
+    })
 }
 
 /// Poll probe: bring the sensor to poll-ready state (replay the setup+calibration
@@ -402,7 +406,7 @@ pub fn arm_capture(
     base: &Path,
     cfg: &crate::session::Config,
 ) -> Result<Vec<u8>> {
-    let seq = load_sequence(base)?;
+    let mut seq = load_sequence(base)?;
     let mut img = Vec::new();       // raw EP2 bytes (encrypted; kept for stats/logging)
     let mut out = Vec::new();       // decrypted image line stream (01fe frames)
     // The EP2 imaging burst is AES-256-CBC encrypted; the key/IV travel in each
@@ -421,7 +425,8 @@ pub fn arm_capture(
     // record-type byte leaking into the command dump); each precedes a reset. Skip
     // them to test whether they are what triggers the imaging-latch re-enumeration.
     let skip_17 = std::env::var("VFS_SKIP_17").is_ok();
-    for (i, plain) in seq.iter().enumerate() {
+    for i in 0..seq.len() {
+        let plain = &seq[i];
         if skip_17 && plain.as_slice() == [0x17] {
             log::info!("[{i:3}] skipping 1-byte 0x17 (artifact test)");
             continue;
@@ -479,6 +484,11 @@ pub fn arm_capture(
             // Diagnostic: dump each command's raw EP2 slice (calibration RE).
             if let Ok(dir) = std::env::var("VFS_DUMP_SLICES") {
                 let _ = std::fs::write(format!("{dir}/{i:02}_raw.bin"), slice);
+            }
+            // Calibration sweep frames arrive in the clear: compute this step's
+            // result and carry it into the remaining commands (see calib.rs).
+            if let Some(applied) = crate::calib::carry_forward(i, slice, &mut seq[i + 1..]) {
+                log::info!("[{i:3}]   calibration: {applied}");
             }
             // Decrypt this command's EP2 slice under the active image key, chaining
             // the CBC IV forward for the next slice (matches HP's per-read decrypt).

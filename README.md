@@ -154,6 +154,12 @@ a held finger scores ~2.1, blank sensor noise ~1.2, so the default cleanly
 separates them. Use `vfs495 ridge-probe` to measure and retune on your hardware
 (it prints the metrics and the accept/reject verdict for a capture without gating).
 
+Every capture session runs the sensor's AFE calibration itself: the open driver
+computes the sweep results (PgaOffset, Adc, PgaGain) from its own calibration
+frames, using ports of HP's step algorithms, and writes them into the commands
+that follow (`src/calib.rs`). It used to replay the values recorded with the
+command stream, and that let the no-finger noise drift up into the finger range.
+
 > An earlier WOE-style poll-divergence gate (poll `0x02`, watch the reply for a
 > jump on contact) was **removed** after hardware testing showed that poll is
 > finger-blind — its reply and the pre-latch image stream do not change on contact.

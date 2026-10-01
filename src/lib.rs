@@ -8,6 +8,7 @@
 //! The [`crypto`] module is validated byte-exact against a live trace; run
 //! [`selftest`] to check it offline with no hardware.
 
+pub mod calib;
 pub mod capture;
 pub mod crypto;
 pub mod image;
