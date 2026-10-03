@@ -14,7 +14,8 @@ former blocker — the no-finger ridge baseline drifting into the finger range �
 fixed (session 10): calibration is now computed per session from our own sweep
 frames (open ports of HP's step functions). Finger detection now gates on contact rows. Swipes are now
 reconstructed at true scale from the sensor's second sensing line (session 11, HP's
-method). Still open: a genuine cross-swipe match through libfprint (§0).
+method), and different live swipes of one finger now match through libfprint
+offline (4 of 6, thin margin — §0).
 
 ---
 
@@ -83,16 +84,18 @@ Results on the recorded swipes (HP's 5 + 1 live; `captures/swipe_*.bin`):
   overlap, so this is not the final word. The 6 full-pad live swipes of 2026-10-02
   cannot be re-run (their raw streams were not saved; they are saved now).
 
-**NEXT ACTION (needs the user's finger):** run `python3 scripts/live_enroll.py`
-(swipe at every green cue, 5 enroll + 1 verify). It keeps every fed image and its
-decrypted stream in the temp dir it prints. Whatever verify says, re-score offline:
-`vfs495 decode --feed --input <stream> --out x.pgm` per stream, then
-`python3 scripts/loo_match.py *.pgm`. If full-pad swipes still score < 40, the
-candidates are (a) image cleanup before feeding (mask the non-finger background,
-drop rows without speed evidence, ridge enhancement), (b) porting HP's remaining
-cull tests / `IRfinalize*Estimates` smoothing, (c) a real libfprint driver instead
-of `virtual_image`, since libfprint's own narrow swipe drivers use a lower match
-threshold than virtual_image's fixed 40 (from memory: ~20-25; verify in the source).
+**Live enroll run 3 (2026-10-03, new reconstruction): first genuine cross-swipe
+matches.** Six full-pad live swipes (`captures/swipe_live2_*.bin`), offline
+leave-one-out: **4 of 6 held-out swipes match** (best scores 40, 57, 57, 40; threshold
+40), impostor max 16. The two failures are poor swipes (one stalled mid-swipe and
+smeared, one started below the core — that one was the live verify). Margin is thin.
+
+**NEXT ACTION (offline, data in `captures/swipe_live2_*.bin`):** widen the margin —
+(a) refuse or trim swipes with a stall (lag track jumps) instead of feeding a smeared
+image, (b) check the slant seen in swipes 3-5 (real drift vs a bias in the `c-131`
+column offset), (c) image cleanup (mask background, ridge enhancement), (d) HP's
+`IRfinalize*Estimates` smoothing. Measure each with `scripts/loo_match.py`. Longer
+term: a real libfprint driver (own match threshold) instead of `virtual_image`.
 
 **Sensor access note:** the udev rule is installed (`user:bine:rw-`); it survives
 re-enumeration. If the sensor gets wedged, a full power-off (not just reboot) clears

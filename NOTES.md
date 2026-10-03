@@ -1611,3 +1611,23 @@ ridges — best time lag between adjacent columns is the same for even and odd c
 observable without a finger), `IRfinalize*Estimates` smoothing (stiction/noise zones),
 `IRpostProcessImage`. Absolute scale rests on the 400/50 = 8 constant (no HP-reconstructed
 image to compare against).
+
+### 2026-10-03 — live enroll run 3 (new reconstruction): FIRST GENUINE CROSS-SWIPE MATCHES (4 of 6 offline)
+User ran live_enroll.py on the `src/swipe.rs` build: six full-pad swipes saved with streams
+(kept as `captures/swipe_live2_{1..6}.bin`, local only). Reconstructions are 200x206-292
+(fed 300x309-438), clear loop-core prints; culled lags 12-33 lines, 420-750 accepted lag
+measurements per swipe. Offline leave-one-out (`scripts/loo_match.py`, enroll 5 / verify the
+6th, bozorth3 threshold 40):
+| held-out | best genuine score | match |
+|---|---|---|
+| 1 | 40 | yes |
+| 2 | 14 | no — lower half smeared (finger stalled: lags jump 16→2→56) |
+| 3 | 57 | yes |
+| 4 | 57 | yes |
+| 5 | 40 | yes |
+| 6 | 18 | no — swipe started below the core (the live verify swipe) |
+Impostor (HP fingertip swipe hp33b) max 16; control 249-253. So different swipes of one
+finger now match through libfprint, which the old reconstruction never did (0/6) — but the
+margin is thin (two matches at exactly 40) and a poor swipe still fails.
+Observed: swipes 3-5 show a slanted finger outline; not yet known whether that is real
+lateral drift or a bias in the secondary→primary column offset (c-131).
