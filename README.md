@@ -145,7 +145,7 @@ fprintd-verify
 sudo ./scripts/system_uninstall.sh  # removes all of the above
 ```
 
-The daemon stays idle until fprintd opens the device, then runs one capture: about
+The daemon stays idle until fprintd is waiting for a finger, then runs one capture: about
 9 s of calibration (do not touch the sensor), then two ~3 s swipe windows during
 which the **Caps Lock LED is lit** (`VFS_CUE_LED` in the unit). Every file the scripts
 touch is listed in [`docs/SYSTEM_CHANGES.md`](docs/SYSTEM_CHANGES.md).

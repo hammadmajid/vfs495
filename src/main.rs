@@ -123,6 +123,11 @@ enum Command {
         /// Seconds to wait between capture cycles.
         #[arg(long, default_value_t = 1)]
         gap: u64,
+        /// The socket belongs to the system fprintd: capture only while fprintd
+        /// reports that it is waiting for a finger (an enroll/verify in progress),
+        /// not merely while the device is open.
+        #[arg(long)]
+        fprintd: bool,
     },
 }
 
@@ -258,9 +263,9 @@ fn main() -> Result<()> {
             virtimage::send_image(&sock, &fpx, fw as u32, fh as u32)?;
             println!("[+] captured a {w}x{h} swipe ({contact} contact rows) and fed {fw}x{fh} to virtual_image");
         }
-        Command::Daemon { socket, min_contact, once, gap } => {
+        Command::Daemon { socket, min_contact, once, gap, fprintd } => {
             let sock = resolve_socket(socket)?;
-            run_daemon(&cli.base, &cfg, &sock, min_contact, once, gap)?;
+            run_daemon(&cli.base, &cfg, &sock, min_contact, once, gap, fprintd)?;
         }
     }
     Ok(())
@@ -344,19 +349,20 @@ fn run_daemon(
     min_contact: usize,
     once: bool,
     gap: u64,
+    fprintd: bool,
 ) -> Result<()> {
     // Suppress the interactive capture prompt; the host UI drives the user.
     std::env::set_var("VFS_NO_PROMPT", "1");
     let dli = image::DliConfig::load_main(base)?;
     log::info!("vfs495 feeder daemon: socket {sock}, min_contact {min_contact}");
-    log::info!("idle until libfprint opens the device (enroll/verify), then capturing");
+    log::info!("idle until a fingerprint is requested (enroll/verify), then capturing");
 
     let mut dev = usb::Sensor::open()?;
     let mut rec = session::handshake(&dev, cfg)?;
     loop {
         // Capture only while something is waiting for a fingerprint: the sensor
         // stays idle otherwise, and no stale image is ever queued.
-        let mut listener = virtimage::wait_for_listener(sock);
+        let mut listener = virtimage::wait_for_request(sock, fprintd);
         log::info!("fingerprint requested; capturing");
         match capture_frame(&mut dev, &mut rec, base, cfg, &dli, min_contact) {
             Ok(Some((px, w, h))) => match virtimage::send_on(&mut listener, &px, w, h) {

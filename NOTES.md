@@ -1713,3 +1713,19 @@ User loaded the SELinux module (`sudo ./scripts/system_selinux.sh`). Bridge then
 end without a finger: `fprintd-enroll` -> fprintd creates `/var/lib/fprint/vfs495.sock` ->
 daemon logs "fingerprint requested; capturing" -> 23 s later "no usable swipe this cycle" ->
 next cycle. No AVC denials. Real enroll/verify needs the user's finger.
+
+### 2026-10-04 — GNOME Settings attempt: device-open is not a scan request; daemon now gates on fprintd `finger-needed`
+User opened GNOME Settings → Fingerprint Login. The dialog stayed on "Scan new fingerprint"
+and nothing was enrolled. Journal: GNOME Settings claims the device as soon as the dialog
+opens, which opens the virtual_image listener — so the daemon ("capture while the device is
+open") ran cycles with no enroll in progress; two real swipes (200x262, 200x242) were captured
+and fed while fprintd had no scan active, and were dropped. (An earlier Settings instance
+also failed its claim, "Device was already claimed", because my no-finger `fprintd-enroll`
+test was holding the device at that moment.) Why the dialog itself did not advance is not
+established.
+Fix: `vfs495 daemon --fprintd` additionally requires fprintd's D-Bus property
+`net.reactivated.Fprint.Device.finger-needed` (read with `busctl --auto-start=no`, so it never
+starts fprintd): false with the device merely claimed, true during enroll/verify (checked
+live). Verified: `fprintd-list` (opens nothing) -> no capture; `fprintd-enroll` -> "fingerprint
+requested; capturing", Caps Lock LED brightness 1 during the window.
+The LED cue works (user saw it blink).

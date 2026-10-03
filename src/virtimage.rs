@@ -18,16 +18,32 @@ pub fn send_image(sock_path: &str, pixels: &[u8], width: u32, height: u32) -> Re
     send_on(&mut stream, pixels, width, height)
 }
 
-/// Block until libfprint is listening on the socket, i.e. until something has
-/// opened the fingerprint device to enroll or verify, and return the connection.
-/// The listener exists only while the device is open, so this is the daemon's
-/// "someone is asking for a fingerprint" signal.
-pub fn wait_for_listener(sock_path: &str) -> UnixStream {
+/// Whether fprintd is waiting for a finger right now (an enroll or verify is in
+/// progress), from its `finger-needed` D-Bus property. An open device alone does
+/// not mean that: GNOME Settings keeps the device claimed for as long as its
+/// fingerprint dialog is open. Never starts fprintd.
+fn finger_needed() -> bool {
+    let device = std::env::var("VFS_FPRINTD_DEVICE").unwrap_or_else(|_| "/net/reactivated/Fprint/Device/0".into());
+    std::process::Command::new("busctl")
+        .args(["--system", "--auto-start=no", "get-property", "net.reactivated.Fprint"])
+        .args([device.as_str(), "net.reactivated.Fprint.Device", "finger-needed"])
+        .output()
+        .map(|o| o.status.success() && o.stdout.starts_with(b"b true"))
+        .unwrap_or(false)
+}
+
+/// Block until a fingerprint is actually being asked for, and return a
+/// connection to libfprint's listener. `via_fprintd`: also require fprintd's
+/// `finger-needed`; otherwise an open device (listening socket) is enough, which
+/// is right when a program drives libfprint directly.
+pub fn wait_for_request(sock_path: &str, via_fprintd: bool) -> UnixStream {
     loop {
-        if let Ok(stream) = UnixStream::connect(sock_path) {
-            return stream;
+        if std::path::Path::new(sock_path).exists() && (!via_fprintd || finger_needed()) {
+            if let Ok(stream) = UnixStream::connect(sock_path) {
+                return stream;
+            }
         }
-        std::thread::sleep(std::time::Duration::from_millis(250));
+        std::thread::sleep(std::time::Duration::from_millis(300));
     }
 }
 

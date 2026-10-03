@@ -20,5 +20,6 @@ restorecon -R /usr/local/bin/vfs495 /usr/local/share/vfs495 /etc/systemd/system/
     /etc/systemd/system/fprintd.service.d 2>/dev/null || true
 systemctl daemon-reload
 systemctl try-restart fprintd.service || true
-systemctl enable --now vfs495.service
+systemctl enable vfs495.service
+systemctl restart vfs495.service
 echo "installed. Enroll with: fprintd-enroll   (swipe while the Caps Lock LED is lit)"

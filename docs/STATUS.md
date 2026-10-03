@@ -109,7 +109,8 @@ part of the finger than anything enrolled still fails.
 **User requirement:** must tolerate sloppy placement/angle/speed like a normal sensor.
 
 **System integration (2026-10-04, in progress — see `docs/SYSTEM_CHANGES.md`):** the
-daemon now captures only when libfprint has the device open, and lights the Caps Lock
+daemon now captures only while fprintd reports `finger-needed` (an open device is not
+enough: GNOME Settings claims it just by showing its dialog), and lights the Caps Lock
 LED during the swipe windows (first window ~9 s after the request, cycle 22 s). Binary,
 data, `vfs495.service` and the fprintd drop-in are installed; fprintd lists the device.
 The SELinux module `vfs495_fprintd` (needed so fprintd can create the socket) was
