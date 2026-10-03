@@ -1670,3 +1670,20 @@ different angles. So the slant is the true swipe path.
 little area with the rest. Swipe 6 is also ~14% taller than swipes 4/5 over the shared area
 (cause unknown: skin stretch or a lag bias). Matcher sensitivity for reference: an image
 against its own 5% / 10% / 15% vertically rescaled copy scores 99 / 69 / 35 (identical: ~250).
+
+### 2026-10-04 — live enroll run 4: FIRST LIVE PASS (exit 0); every pair matches; cross-session matching works
+User ran live_enroll.py on the sub-pixel-drift + mask build: 5/5 enroll, **live verify
+PASS** — the first genuine live match of the fully-open path. Streams kept as
+`captures/swipe_live3_{1..6}.bin` (local only). Offline on those six (300x388-451 fed):
+- leave-one-out: 6 of 6 match, best scores 81-104;
+- pairwise (`scripts/pair_scores.py`): **30 of 30 pairs >= 40**, mean 84.1, min 41;
+  mirrored impostors max 10.
+Cross-session (different placement, angle, speed — the swipes of run 3):
+- enrolled run 4 swipes 1-5, verified run 3's six: swipes 1/3/4/5 match (84/52/47/57),
+  swipe 6 (started below the core) best 37, swipe 2 (3.7 mm off to the side) best 16;
+  mirrored impostor 5.
+- enrolled run 3 swipes 1,3,4,5,6, verified run 4's six: 6 of 6 match (53-89).
+So speed and angle differences are handled; what still fails is a swipe that covers a
+mostly different part of the finger than anything enrolled. User requirement (2026-10-04):
+it must tolerate sloppy placement/angle/speed — do not answer misses with "swipe more
+consistently".

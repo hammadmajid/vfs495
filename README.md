@@ -185,12 +185,13 @@ command stream, and that let the no-finger noise drift up into the finger range.
   ridge period ~14 px). The DLI config is confirmed on-device with
   `scripts/dump_dli_config.gdb.py` (→ `captures/dli_config.json`, auto-loaded).
   A firm, steady swipe is needed for a full-height image.
-- **Swipe reconstruction follows HP's method but matching depends on swipe placement.**
+- **Swipe reconstruction follows HP's method ; live enroll + verify passes.**
   `src/swipe.rs` measures finger speed from the sensor's second sensing line (8
   rows upstream of the imaging line) and resamples to square 50 µm pixels, so
-  swipes of different speed come out at the same scale. Different swipes of one
-  finger match through libfprint only when they cover the same finger area
-  (4 of 6 live test swipes; see `docs/STATUS.md` §0). `scripts/loo_match.py` runs
+  swipes of different speed and angle come out at the same scale. Live enroll +
+  verify through libfprint passes; a swipe that shows a mostly different part of
+  the finger than any enrolled swipe is still rejected (see `docs/STATUS.md` §0).
+  `scripts/loo_match.py` runs
   the offline match test, `scripts/pair_scores.py` pairwise scores.
 - **Unowned sensors only.** Owned sensors need the pairing (`TakeOwnership`) flow
   — fully mapped in `NOTES.md` but not implemented, since it is a persistent,

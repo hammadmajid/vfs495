@@ -14,8 +14,8 @@ former blocker — the no-finger ridge baseline drifting into the finger range �
 fixed (session 10): calibration is now computed per session from our own sweep
 frames (open ports of HP's step functions). Finger detection now gates on contact rows. Swipes are now
 reconstructed at true scale from the sensor's second sensing line (session 11, HP's
-method), and different live swipes of one finger now match through libfprint
-offline (4 of 6, thin margin — §0).
+method), and **live enroll + verify passes** (2026-10-04; every pair of that run's
+six swipes matches, mean score 84 — §0).
 
 ---
 
@@ -98,13 +98,21 @@ placement** (one 3.7 mm off to the side, one started below the core), not on
 reconstruction. Rejected with numbers in NOTES: Gabor enhancement, other enlargement
 factors, fixed/constant lateral drift, global rescale, stall trimming.
 
-**NEXT ACTION:** in practice the margin now depends on swipe placement and on how
-varied the 5 enrolled swipes are. Options: (a) user re-runs `scripts/live_enroll.py`
-aiming the same finger area each time, to see the live verify pass; (b) explain swipe 6's
-~14% vertical stretch (skin stretch vs lag bias) — the remaining reconstruction
-question; (c) port HP's `IRfinalize*Estimates`; (d) a real libfprint driver (own
-threshold, retry-on-bad-swipe) instead of `virtual_image`; then the fprintd drop-in
-(system change — ask first).
+**FIRST LIVE PASS (run 4, 2026-10-04):** `live_enroll.py` enrolled 5 swipes and the
+live verify matched. Offline on its six swipes (`captures/swipe_live3_*.bin`): 30 of 30
+pairs >= 40 (mean 84, min 41), impostors <= 10. Cross-session: a template from run 4
+matches 4 of run 3's 6 sloppier swipes (the other two score 37 and 16: one started
+below the core, one was 3.7 mm off to the side); a template from run 3 matches 6 of 6
+of run 4. Speed and angle differences are handled; a swipe showing a mostly different
+part of the finger than anything enrolled still fails.
+
+**User requirement:** must tolerate sloppy placement/angle/speed like a normal sensor.
+
+**NEXT ACTION:** (a) tolerance to partial overlap: a real libfprint driver (own match
+threshold — narrow swipe drivers use lower than virtual_image's 40 — and proper
+retry-on-bad-swipe), and/or enrolling more varied swipes; (b) wire into fprintd
+(systemd drop-in — system change, ask the user first) for real login use; (c) swipe 6's
+~14% vertical stretch; (d) HP's `IRfinalize*Estimates`.
 
 **Sensor access note:** the udev rule is installed (`user:bine:rw-`); it survives
 re-enumeration. If the sensor gets wedged, a full power-off (not just reboot) clears
