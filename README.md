@@ -185,7 +185,7 @@ command stream, and that let the no-finger noise drift up into the finger range.
   ridge period ~14 px). The DLI config is confirmed on-device with
   `scripts/dump_dli_config.gdb.py` (→ `captures/dli_config.json`, auto-loaded).
   A firm, steady swipe is needed for a full-height image.
-- **Swipe reconstruction follows HP's method ; live enroll + verify passes.**
+- **Swipe reconstruction follows HP's method; live enroll + verify passes.**
   `src/swipe.rs` measures finger speed from the sensor's second sensing line (8
   rows upstream of the imaging line) and resamples to square 50 µm pixels, so
   swipes of different speed and angle come out at the same scale. Live enroll +
