@@ -117,7 +117,7 @@ FP_VIRTUAL_IMAGE=/run/user/$(id -u)/vfs495.sock
 vfs495 run --socket "$FP_VIRTUAL_IMAGE"
 
 # 6. Run continuously as a feeder daemon (for enroll/verify through fprintd):
-#    captures on each finger touch, skips empty cycles, pushes images to the socket.
+#    captures whenever libfprint opens the device, pushes swipes to the socket.
 sudo -E FP_VIRTUAL_IMAGE="$FP_VIRTUAL_IMAGE" vfs495 daemon
 #    --once     capture one frame and exit (testing)
 #    --min-contact 300 finger-detection threshold (rows with finger contact)
@@ -131,23 +131,24 @@ driver. Once decoded images reach libfprint via `virtual_image`, `fprintd-enroll
 all work through the stock stack. The enroll → match → reject round-trip through
 libfprint is proven in [`scripts/vimage_proof.py`](scripts/vimage_proof.py).
 
-The **`vfs495 daemon`** command bridges the two: it captures on each finger
-touch, decodes, and pushes the image to the `virtual_image` socket. To route the
-system `fprintd` through it, point fprintd at the same socket with a systemd
-drop-in (**a system-config change you must opt into**):
+The **`vfs495 daemon`** command bridges the two: when fprintd opens the device it
+captures a swipe, decodes it, and pushes the image to the `virtual_image` socket.
+Routing the system `fprintd` through it is **a system-config change you must opt
+into**:
 
 ```sh
-# /etc/systemd/system/fprintd.service.d/virtual-image.conf
-[Service]
-Environment=FP_VIRTUAL_IMAGE=/run/vfs495.sock
-```
-
-```sh
-sudo systemctl daemon-reload && sudo systemctl restart fprintd
-sudo -E FP_VIRTUAL_IMAGE=/run/vfs495.sock vfs495 daemon      # leave running
-fprintd-enroll        # then SWIPE your finger slowly across the sensor when prompted (five stages)
+cargo build --release
+sudo ./scripts/system_install.sh    # binary + data to /usr/local, vfs495.service, fprintd drop-in
+sudo ./scripts/system_selinux.sh    # SELinux systems only: lets fprintd create the socket
+fprintd-enroll                      # five stages; swipe each time the Caps Lock LED lights
 fprintd-verify
+sudo ./scripts/system_uninstall.sh  # removes all of the above
 ```
+
+The daemon stays idle until fprintd opens the device, then runs one capture: about
+9 s of calibration (do not touch the sensor), then two ~3 s swipe windows during
+which the **Caps Lock LED is lit** (`VFS_CUE_LED` in the unit). Every file the scripts
+touch is listed in [`docs/SYSTEM_CHANGES.md`](docs/SYSTEM_CHANGES.md).
 
 **This is a swipe sensor: slide your finger slowly down across it (1–2 s). A
 finger held still does not produce a fingerprint image.**

@@ -52,7 +52,24 @@ enum Cue {
     Wait,
 }
 
-fn cue(c: Cue) {
+/// `VFS_CUE_LED=<name>` (e.g. `capslock`): light `/sys/class/leds/*<name>` while
+/// a swipe window is open. The only cue available where no terminal is — at the
+/// login screen or under `sudo`, with the daemon running as a service.
+fn cue_led(on: bool) {
+    let Ok(name) = std::env::var("VFS_CUE_LED") else { return };
+    let Ok(dir) = std::fs::read_dir("/sys/class/leds") else { return };
+    for entry in dir.flatten() {
+        if entry.file_name().to_string_lossy().ends_with(&name) {
+            let _ = std::fs::write(entry.path().join("brightness"), if on { "1" } else { "0" });
+        }
+    }
+}
+
+fn cue(c: Cue, print: bool) {
+    cue_led(matches!(c, Cue::Swipe));
+    if !print {
+        return;
+    }
     use std::io::IsTerminal;
     let (bg, text) = match c {
         Cue::DontTouch => ("41", "  DON'T TOUCH  "),
@@ -449,9 +466,7 @@ pub fn arm_capture(
     // desktop prompts). Calibration (seq 0..~15) must run with NO finger; the
     // swipe cue is printed exactly when each imaging window opens.
     let prompt = std::env::var("VFS_NO_PROMPT").is_err();
-    if prompt {
-        cue(Cue::DontTouch);
-    }
+    cue(Cue::DontTouch, prompt);
     // Experiment: the 1-byte 0x17 entries may be a trace artifact (the SSL AppData
     // record-type byte leaking into the command dump); each precedes a reset. Skip
     // them to test whether they are what triggers the imaging-latch re-enumeration.
@@ -462,13 +477,11 @@ pub fn arm_capture(
             log::info!("[{i:3}] skipping 1-byte 0x17 (artifact test)");
             continue;
         }
-        if prompt {
-            if SWIPE_WINDOWS.contains(&i) {
-                cue(Cue::Swipe);
-            } else if let Some(prev) = i.checked_sub(1).filter(|p| SWIPE_WINDOWS.contains(p)) {
-                // The window has drained: wait for the next one, or stop.
-                cue(if prev == SWIPE_WINDOWS[SWIPE_WINDOWS.len() - 1] { Cue::DontTouch } else { Cue::Wait });
-            }
+        if SWIPE_WINDOWS.contains(&i) {
+            cue(Cue::Swipe, prompt);
+        } else if let Some(prev) = i.checked_sub(1).filter(|p| SWIPE_WINDOWS.contains(p)) {
+            // The window has drained: wait for the next one, or stop.
+            cue(if prev == SWIPE_WINDOWS[SWIPE_WINDOWS.len() - 1] { Cue::DontTouch } else { Cue::Wait }, prompt);
         }
         let cmd_op = plain[0];
         if let Some((k, iv)) = parse_security_params(plain) {

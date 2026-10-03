@@ -349,19 +349,21 @@ fn run_daemon(
     std::env::set_var("VFS_NO_PROMPT", "1");
     let dli = image::DliConfig::load_main(base)?;
     log::info!("vfs495 feeder daemon: socket {sock}, min_contact {min_contact}");
-    log::info!("waiting for finger touches (swipe your finger across the sensor when your desktop asks to scan)");
+    log::info!("idle until libfprint opens the device (enroll/verify), then capturing");
 
     let mut dev = usb::Sensor::open()?;
     let mut rec = session::handshake(&dev, cfg)?;
     loop {
+        // Capture only while something is waiting for a fingerprint: the sensor
+        // stays idle otherwise, and no stale image is ever queued.
+        let mut listener = virtimage::wait_for_listener(sock);
+        log::info!("fingerprint requested; capturing");
         match capture_frame(&mut dev, &mut rec, base, cfg, &dli, min_contact) {
-            Ok(Some((px, w, h))) => match virtimage::send_image(sock, &px, w, h) {
+            Ok(Some((px, w, h))) => match virtimage::send_on(&mut listener, &px, w, h) {
                 Ok(()) => log::info!("fed {w}x{h} image to virtual_image"),
-                Err(e) => log::warn!(
-                    "captured {w}x{h} but socket feed failed: {e}                      (is fprintd running with FP_VIRTUAL_IMAGE set to {sock}?)"
-                ),
+                Err(e) => log::warn!("captured {w}x{h} but the request was gone: {e}"),
             },
-            Ok(None) => log::debug!("no finger this cycle; skipping"),
+            Ok(None) => log::info!("no usable swipe this cycle"),
             Err(e) => {
                 // The session/device faulted (e.g. the sensor dropped off the bus).
                 // Rebuild it rather than tight-looping: back off (also lets a USB

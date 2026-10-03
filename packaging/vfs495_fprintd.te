@@ -1,0 +1,13 @@
+# SELinux: let fprintd create libfprint's virtual_image listening socket inside
+# its own state directory (/var/lib/fprint). The stock policy gives fprintd no
+# permission to create a socket file, so the virtual_image device cannot open
+# without this. Nothing else is granted.
+module vfs495_fprintd 1.0;
+
+require {
+    type fprintd_t;
+    type fprintd_var_lib_t;
+    class sock_file { create unlink write getattr setattr };
+}
+
+allow fprintd_t fprintd_var_lib_t:sock_file { create unlink write getattr setattr };

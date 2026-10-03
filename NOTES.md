@@ -1687,3 +1687,24 @@ So speed and angle differences are handled; what still fails is a swipe that cov
 mostly different part of the finger than anything enrolled. User requirement (2026-10-04):
 it must tolerate sloppy placement/angle/speed — do not answer misses with "swipe more
 consistently".
+
+### 2026-10-04 — system integration started (user OK'd sudo changes; all recorded in docs/SYSTEM_CHANGES.md)
+Daemon reworked first (no system change): it now **captures only on request** — it blocks
+until it can connect to the virtual_image socket, which libfprint listens on only while the
+device is open (enroll/verify in progress), holds that connection, captures, and sends the
+image on it. Sensor idle otherwise; no stale image can be queued. Optional cue
+`VFS_CUE_LED=capslock`: that LED is lit exactly during the two imaging windows (the only cue
+possible at the login screen / under sudo). Dry run against a private libfprint, no finger:
+request -> first window after 9 s, second after 13 s, cycle done at 22 s (pam_fprintd's
+default timeout is 30 s, so one cycle fits, a retry does not).
+Installed with `scripts/system_install.sh`: binary + device data under /usr/local,
+`vfs495.service`, fprintd drop-in. fprintd lists the device ("Virtual image device for
+debugging").
+**Blocked by SELinux (enforcing):** fprintd cannot create the socket.
+- `/run/vfs495/` via `RuntimeDirectory=`: `avc: denied { write } ... fprintd_t ... var_run_t dir`.
+- `/var/lib/fprint/vfs495.sock`: `avc: denied { create } ... fprintd_var_lib_t sock_file`.
+So the virtual_image bridge cannot work under the stock policy; it needs a local module
+(`packaging/vfs495_fprintd.te`, loaded by `scripts/system_selinux.sh`). Loading it was left
+to the user (not applied). A real libfprint driver would not need it.
+Also seen: restarting the service right after stopping it hits the known re-enumeration
+("EP_OUT write failed: No such device"); `Restart=on-failure` + 5 s recovers.

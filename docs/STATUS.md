@@ -108,11 +108,20 @@ part of the finger than anything enrolled still fails.
 
 **User requirement:** must tolerate sloppy placement/angle/speed like a normal sensor.
 
-**NEXT ACTION:** (a) tolerance to partial overlap: a real libfprint driver (own match
-threshold — narrow swipe drivers use lower than virtual_image's 40 — and proper
-retry-on-bad-swipe), and/or enrolling more varied swipes; (b) wire into fprintd
-(systemd drop-in — system change, ask the user first) for real login use; (c) swipe 6's
-~14% vertical stretch; (d) HP's `IRfinalize*Estimates`.
+**System integration (2026-10-04, in progress — see `docs/SYSTEM_CHANGES.md`):** the
+daemon now captures only when libfprint has the device open, and lights the Caps Lock
+LED during the swipe windows (first window ~9 s after the request, cycle 22 s). Binary,
+data, `vfs495.service` and the fprintd drop-in are installed; fprintd lists the device.
+**Blocked:** SELinux denies fprintd creating the virtual_image socket. Needs the local
+module `packaging/vfs495_fprintd.te` (`sudo ./scripts/system_selinux.sh`) — **waiting
+for the user to decide**. Then: `fprintd-enroll` (5 swipes, each on the LED),
+`fprintd-verify`, `sudo`.
+
+**NEXT ACTION after that:** (a) shorten the wait (9 s calibration before the first
+window; feed right after the second window instead of after the trailing commands);
+(b) tolerance to partial overlap: a real libfprint driver (own match threshold, proper
+retry, and no SELinux module needed) and/or more varied enrolment; (c) swipe 6's ~14%
+vertical stretch; (d) HP's `IRfinalize*Estimates`.
 
 **Sensor access note:** the udev rule is installed (`user:bine:rw-`); it survives
 re-enumeration. If the sensor gets wedged, a full power-off (not just reboot) clears
