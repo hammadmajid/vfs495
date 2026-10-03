@@ -24,11 +24,11 @@ Pre-existing, not part of this change: `/etc/udev/rules.d/70-vfs495.rules` (inst
 in an earlier session; lets the user open the sensor without sudo).
 `/var/lib/fprint` was empty before (no enrolled prints).
 
-## NOT applied — needs the user's decision
+## Applied 2026-10-04 by the user: `sudo ./scripts/system_selinux.sh`
 
-| Change | Why it is needed | How | Reverse |
-|---|---|---|---|
-| SELinux module `vfs495_fprintd` (`packaging/vfs495_fprintd.te`) | SELinux (enforcing) denies fprintd creating the `virtual_image` socket: `avc: denied { create } ... scontext=fprintd_t tcontext=fprintd_var_lib_t tclass=sock_file` (and `{ write }` on a `/run` directory). Without it the device fails to open: "Error binding to address: Permission denied". The module allows fprintd to create/unlink a socket file in its own `/var/lib/fprint` and nothing else. | `sudo ./scripts/system_selinux.sh` | `sudo semodule -r vfs495_fprintd` (also done by the uninstall script) |
+| Change | Why | Reverse |
+|---|---|---|
+| SELinux module `vfs495_fprintd` (`packaging/vfs495_fprintd.te`) | SELinux (enforcing) denied fprintd creating the `virtual_image` socket (`avc: denied { create } ... scontext=fprintd_t tcontext=fprintd_var_lib_t tclass=sock_file`), so the device could not open. The module allows fprintd to create/unlink a socket file in its own `/var/lib/fprint` and nothing else. | `sudo semodule -r vfs495_fprintd` (also done by the uninstall script) |
 
 ## Created later by use (not by the scripts)
 

@@ -1708,3 +1708,8 @@ So the virtual_image bridge cannot work under the stock policy; it needs a local
 to the user (not applied). A real libfprint driver would not need it.
 Also seen: restarting the service right after stopping it hits the known re-enumeration
 ("EP_OUT write failed: No such device"); `Restart=on-failure` + 5 s recovers.
+
+User loaded the SELinux module (`sudo ./scripts/system_selinux.sh`). Bridge then works end to
+end without a finger: `fprintd-enroll` -> fprintd creates `/var/lib/fprint/vfs495.sock` ->
+daemon logs "fingerprint requested; capturing" -> 23 s later "no usable swipe this cycle" ->
+next cycle. No AVC denials. Real enroll/verify needs the user's finger.

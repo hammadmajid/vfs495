@@ -112,10 +112,11 @@ part of the finger than anything enrolled still fails.
 daemon now captures only when libfprint has the device open, and lights the Caps Lock
 LED during the swipe windows (first window ~9 s after the request, cycle 22 s). Binary,
 data, `vfs495.service` and the fprintd drop-in are installed; fprintd lists the device.
-**Blocked:** SELinux denies fprintd creating the virtual_image socket. Needs the local
-module `packaging/vfs495_fprintd.te` (`sudo ./scripts/system_selinux.sh`) — **waiting
-for the user to decide**. Then: `fprintd-enroll` (5 swipes, each on the LED),
-`fprintd-verify`, `sudo`.
+The SELinux module `vfs495_fprintd` (needed so fprintd can create the socket) was
+loaded by the user. Verified without a finger: `fprintd-enroll` claims the device, the
+daemon captures on that request and reports "no usable swipe", no AVC denials.
+**Waiting for the user:** `fprintd-enroll` (5 swipes, each on the LED), `fprintd-verify`,
+then `sudo` in a new terminal.
 
 **NEXT ACTION after that:** (a) shorten the wait (9 s calibration before the first
 window; feed right after the second window instead of after the trailing commands);
