@@ -1729,3 +1729,24 @@ starts fprintd): false with the device merely claimed, true during enroll/verify
 live). Verified: `fprintd-list` (opens nothing) -> no capture; `fprintd-enroll` -> "fingerprint
 requested; capturing", Caps Lock LED brightness 1 during the window.
 The LED cue works (user saw it blink).
+
+### 2026-10-04 — first fprintd-enroll: 4 stages passed, then "enroll-disconnected" = libfprint's overheating model; capture made ~5x faster per swipe
+User ran `fprintd-enroll` on the system: **4 x enroll-stage-passed** from real swipes
+(200x299, 200x235, 200x241, 200x213), then three empty cycles, then fprintd logged
+`Device reported an error during enroll: Device disabled to prevent overheating` and the
+client saw `enroll-disconnected`. That is libfprint's generic temperature model (a device
+that stays active ~3 min is declared too hot, cools over ~9 min; my no-finger tests had
+pre-warmed it), not the sensor. At 23 s per capture cycle, 5 stages plus any miss cannot
+fit.
+**Fix: windows repeat without recalibration.** The recorded sequence is
+`0..21` setup + calibration, then two units of (poll `0x02 ..15`, imaging `0x02 ..00`, `0x17`,
+`0x04`) = idx 22-25 and 26-29, then `30..41` closing commands. Live test (`vfs495
+window-test --count 8`, no finger): after `0..21` once (9.4 s), the unit 26-29 can be sent
+again and again — 8 of 8 windows returned a full burst (2 236 384-2 237 200 bytes, 8200-8203
+lines, 0 contact rows, median line sd 44.8-44.9), 4.1 s each. Not yet verified with a finger.
+`capture::Capture` now exposes `prepare()` / `window()` / `finish()`; the daemon calibrates
+once per request, then opens windows back to back, feeds a swipe as soon as its window
+closes, reconnects for the next scan (waits up to 3 s for one), and sends the closing
+commands when nothing wants a finger any more (max 30 windows per request). The LED is lit
+~3 s out of every ~4 s after the initial ~9 s. `arm_capture` (used by `run`, `capture`,
+`ridge-probe`, live_enroll.py) still replays the whole recorded sequence.

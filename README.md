@@ -145,9 +145,11 @@ fprintd-verify
 sudo ./scripts/system_uninstall.sh  # removes all of the above
 ```
 
-The daemon stays idle until fprintd is waiting for a finger, then runs one capture: about
-9 s of calibration (do not touch the sensor), then two ~3 s swipe windows during
-which the **Caps Lock LED is lit** (`VFS_CUE_LED` in the unit). Every file the scripts
+The daemon stays idle until fprintd is waiting for a finger. It then calibrates
+for about 9 s (do not touch the sensor) and opens swipe windows back to back: the
+**Caps Lock LED is lit** while the sensor records (about 3 s of every 4;
+`VFS_CUE_LED` in the unit). Swipe once while it is lit; each swipe is fed as soon
+as its window closes. Every file the scripts
 touch is listed in [`docs/SYSTEM_CHANGES.md`](docs/SYSTEM_CHANGES.md).
 
 **This is a swipe sensor: slide your finger slowly down across it (1–2 s). A

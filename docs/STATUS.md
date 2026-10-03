@@ -116,12 +116,16 @@ data, `vfs495.service` and the fprintd drop-in are installed; fprintd lists the 
 The SELinux module `vfs495_fprintd` (needed so fprintd can create the socket) was
 loaded by the user. Verified without a finger: `fprintd-enroll` claims the device, the
 daemon captures on that request and reports "no usable swipe", no AVC denials.
-**Waiting for the user:** `fprintd-enroll` (5 swipes, each on the LED), `fprintd-verify`,
-then `sudo` in a new terminal.
+First `fprintd-enroll` (2026-10-04): 4 stages passed from real swipes, then libfprint's
+generic overheating model cut it off (device active ~3 min; 23 s per capture cycle was too
+slow). Now the daemon calibrates once per request (~9 s) and then repeats imaging windows
+(~4 s each, LED lit ~3 s of it) with no recalibration — verified without a finger
+(8/8 windows full), **not yet with a finger**.
+**Waiting for the user:** `fprintd-enroll` again, `fprintd-verify`, then `sudo` in a new
+terminal.
 
-**NEXT ACTION after that:** (a) shorten the wait (9 s calibration before the first
-window; feed right after the second window instead of after the trailing commands);
-(b) tolerance to partial overlap: a real libfprint driver (own match threshold, proper
+**NEXT ACTION after that:** (a) shorten the 9 s calibration wait before the first
+window (calibrate ahead of time?); (b) tolerance to partial overlap: a real libfprint driver (own match threshold, proper
 retry, and no SELinux module needed) and/or more varied enrolment; (c) swipe 6's ~14%
 vertical stretch; (d) HP's `IRfinalize*Estimates`.
 

@@ -10,6 +10,7 @@
 use anyhow::{Context, Result};
 use std::io::Write;
 use std::os::unix::net::UnixStream;
+use std::time::{Duration, Instant};
 
 /// Send one grayscale image to the virtual_image socket.
 pub fn send_image(sock_path: &str, pixels: &[u8], width: u32, height: u32) -> Result<()> {
@@ -32,19 +33,36 @@ fn finger_needed() -> bool {
         .unwrap_or(false)
 }
 
-/// Block until a fingerprint is actually being asked for, and return a
-/// connection to libfprint's listener. `via_fprintd`: also require fprintd's
-/// `finger-needed`; otherwise an open device (listening socket) is enough, which
-/// is right when a program drives libfprint directly.
-pub fn wait_for_request(sock_path: &str, via_fprintd: bool) -> UnixStream {
+/// Wait until a fingerprint is actually being asked for and return a connection
+/// to libfprint's listener, or `None` after `timeout` (`None` = wait forever).
+/// `via_fprintd`: also require fprintd's `finger-needed`; otherwise an open
+/// device (listening socket) is enough, which is right when a program drives
+/// libfprint directly.
+pub fn wait_for_request(sock_path: &str, via_fprintd: bool, timeout: Option<Duration>) -> Option<UnixStream> {
+    let start = Instant::now();
     loop {
         if std::path::Path::new(sock_path).exists() && (!via_fprintd || finger_needed()) {
             if let Ok(stream) = UnixStream::connect(sock_path) {
-                return stream;
+                return Some(stream);
             }
         }
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        if timeout.is_some_and(|t| start.elapsed() >= t) {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(300));
     }
+}
+
+/// Whether the request this connection was opened for is still waiting for a
+/// finger: libfprint has not closed the device, and (via fprintd) a scan is
+/// still in progress.
+pub fn still_wanted(stream: &UnixStream, via_fprintd: bool) -> bool {
+    use std::io::Read;
+    let mut probe = [0u8; 1];
+    let open = stream.set_nonblocking(true).is_ok()
+        && matches!((&*stream).read(&mut probe), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock);
+    let _ = stream.set_nonblocking(false);
+    open && (!via_fprintd || finger_needed())
 }
 
 /// Send one grayscale image on an established connection.

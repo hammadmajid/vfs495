@@ -438,91 +438,141 @@ pub fn poll_probe(
     Ok(())
 }
 
-/// Replay the in-session capture command sequence as AppData records (all
+/// The commands of one imaging window, replayable any number of times after
+/// [`Capture::prepare`]: the poll that precedes the imaging command, the imaging
+/// command itself (`SWIPE_WINDOWS[1]`), and the two that close it. Live-checked
+/// 2026-10-04: repeating this unit keeps returning full image bursts with no
+/// recalibration.
+const WINDOW_UNIT: std::ops::RangeInclusive<usize> = 26..=29;
+/// Everything before the first window: setup, calibration (no finger!), arming.
+const PREPARE: std::ops::Range<usize> = 0..22;
+/// The recorded sequence's closing commands, sent when a request is over.
+const FINISH: std::ops::Range<usize> = 30..42;
+
+/// One in-session capture: replays the command sequence as AppData records (all
 /// in-session commands are `0x17` records on EP1 regardless of their inner
 /// command byte), decrypting every reply in order so the CBC IV chain and
-/// receive sequence stay aligned. Logs the decoded status word of each reply and
-/// flags the first `0x02` (capture/poll) reply the sensor rejects — the datum
-/// that tells us which in-session device state is missing. Drains the plaintext
-/// image from EP2 throughout. A finger must be swiping for real frames to appear.
-pub fn arm_capture(
-    dev: &mut Sensor,
-    rec: &mut Record,
-    base: &Path,
-    cfg: &crate::session::Config,
-) -> Result<Vec<u8>> {
-    let mut seq = load_sequence(base)?;
-    let mut img = Vec::new();       // raw EP2 bytes (encrypted; kept for stats/logging)
-    let mut out = Vec::new();       // decrypted image line stream (01fe frames)
+/// receive sequence stay aligned, and draining + decrypting the EP2 image
+/// stream throughout. Calibration results computed from this session's sweep
+/// frames are patched into the later commands (see `calib.rs`).
+pub struct Capture<'a> {
+    dev: &'a mut Sensor,
+    rec: &'a mut Record,
+    cfg: &'a crate::session::Config,
+    seq: Vec<Vec<u8>>,
     // The EP2 imaging burst is AES-256-CBC encrypted; the key/IV travel in each
     // GetFingerprint command's SecurityParams TLV (see `parse_security_params`).
     // Each such command resets the key and initial IV; the IV then chains across
     // EP2 reads (last ciphertext block -> next IV), exactly as HP's
     // `scsSensorDecryptFingerprint` does. EP2 reads are 16-byte aligned, so a
     // per-command slice is always a whole number of AES blocks.
-    let mut cur_key: Option<[u8; 32]> = None;
-    let mut cur_iv = [0u8; 16];
-    // User cues (suppressed with VFS_NO_PROMPT, e.g. in the daemon where the
-    // desktop prompts). Calibration (seq 0..~15) must run with NO finger; the
-    // swipe cue is printed exactly when each imaging window opens.
-    let prompt = std::env::var("VFS_NO_PROMPT").is_err();
-    cue(Cue::DontTouch, prompt);
-    // Experiment: the 1-byte 0x17 entries may be a trace artifact (the SSL AppData
-    // record-type byte leaking into the command dump); each precedes a reset. Skip
-    // them to test whether they are what triggers the imaging-latch re-enumeration.
-    let skip_17 = std::env::var("VFS_SKIP_17").is_ok();
-    for i in 0..seq.len() {
-        let plain = &seq[i];
-        if skip_17 && plain.as_slice() == [0x17] {
-            log::info!("[{i:3}] skipping 1-byte 0x17 (artifact test)");
-            continue;
-        }
-        if SWIPE_WINDOWS.contains(&i) {
-            cue(Cue::Swipe, prompt);
-        } else if let Some(prev) = i.checked_sub(1).filter(|p| SWIPE_WINDOWS.contains(p)) {
-            // The window has drained: wait for the next one, or stop.
-            cue(if prev == SWIPE_WINDOWS[SWIPE_WINDOWS.len() - 1] { Cue::DontTouch } else { Cue::Wait }, prompt);
-        }
-        let cmd_op = plain[0];
-        if let Some((k, iv)) = parse_security_params(plain) {
-            cur_key = Some(k);
-            cur_iv = iv;
-            log::info!("[{i:3}] cmd=0x{cmd_op:02x} carries SecurityParams (AES-256 image key/IV)");
-        }
-        // send_cmd handles the imaging-latch re-enumeration: reopen the handle and
-        // re-handshake a fresh session (the reset drops the old one), then resend.
-        // Experiment: VFS_NO_REHANDSHAKE reopens but does NOT re-handshake, to test
-        // whether the sensor enters an imaging mode that streams EP2 frames without
-        // a fresh session (i.e. whether the re-handshake is what causes the reset loop).
-        let recover = if std::env::var("VFS_NO_REHANDSHAKE").is_ok() { None } else { Some(cfg) };
-        let before = img.len();
-        match send_cmd_draining(dev, rec, plain, recover, Some(&mut img)) {
-            Some((_, RESET_SKIPPED)) => {
-                log::info!(
-                    "[{i:3}] cmd=0x{cmd_op:02x} -> RE-ENUM, skipped (HP-resume); next cmd tests session survival"
-                );
+    cur_key: Option<[u8; 32]>,
+    cur_iv: [u8; 16],
+    // Terminal cues (suppressed with VFS_NO_PROMPT, e.g. in the daemon).
+    prompt: bool,
+}
+
+impl<'a> Capture<'a> {
+    pub fn new(
+        dev: &'a mut Sensor,
+        rec: &'a mut Record,
+        base: &Path,
+        cfg: &'a crate::session::Config,
+    ) -> Result<Self> {
+        Ok(Capture {
+            dev,
+            rec,
+            cfg,
+            seq: load_sequence(base)?,
+            cur_key: None,
+            cur_iv: [0u8; 16],
+            prompt: std::env::var("VFS_NO_PROMPT").is_err(),
+        })
+    }
+
+    /// Setup + calibration, up to the first imaging window (~9 s). The sensor
+    /// must not be touched while this runs.
+    pub fn prepare(&mut self) -> Result<()> {
+        cue(Cue::DontTouch, self.prompt);
+        self.run(PREPARE).map(|_| ())
+    }
+
+    /// Open one imaging window (~3 s; the swipe cue is on while it records) and
+    /// return its decrypted line stream.
+    pub fn window(&mut self) -> Result<Vec<u8>> {
+        let out = self.run(WINDOW_UNIT);
+        cue(Cue::Wait, self.prompt);
+        out
+    }
+
+    /// Close the capture (the recorded sequence's trailing commands).
+    pub fn finish(&mut self) -> Result<()> {
+        cue(Cue::DontTouch, self.prompt);
+        self.run(FINISH).map(|_| ())
+    }
+
+    /// Send commands `idxs` of the sequence; returns the decrypted image bytes
+    /// they produced.
+    fn run(&mut self, idxs: impl IntoIterator<Item = usize>) -> Result<Vec<u8>> {
+        let mut out = Vec::new(); // decrypted image line stream (01fe frames)
+        // Experiment: the 1-byte 0x17 entries may be a trace artifact (the SSL AppData
+        // record-type byte leaking into the command dump); each precedes a reset. Skip
+        // them to test whether they are what triggers the imaging-latch re-enumeration.
+        let skip_17 = std::env::var("VFS_SKIP_17").is_ok();
+        for i in idxs {
+            let plain = self.seq[i].clone();
+            if skip_17 && plain.as_slice() == [0x17] {
+                log::info!("[{i:3}] skipping 1-byte 0x17 (artifact test)");
+                continue;
             }
-            Some((payload, status)) => {
-                let ok = status_is_ok(status);
-                log::info!(
-                    "[{i:3}] cmd=0x{cmd_op:02x} -> status=0x{status:04x} payload={}B {}",
-                    payload.len(),
-                    if ok { "OK" } else { "**REJECT**" }
-                );
+            // The swipe cue goes on exactly when an imaging command is sent.
+            if SWIPE_WINDOWS.contains(&i) {
+                cue(Cue::Swipe, self.prompt);
+            } else if i.checked_sub(1).is_some_and(|p| SWIPE_WINDOWS.contains(&p)) {
+                cue(Cue::Wait, self.prompt);
             }
-            None => {
-                log::warn!("[{i:3}] cmd 0x{cmd_op:02x} write failed after recovery; stopping");
-                break;
+            let cmd_op = plain[0];
+            if let Some((k, iv)) = parse_security_params(&plain) {
+                self.cur_key = Some(k);
+                self.cur_iv = iv;
+                log::info!("[{i:3}] cmd=0x{cmd_op:02x} carries SecurityParams (AES-256 image key/IV)");
             }
-        }
-        // Keep draining until EP2 has been quiet for a few reads, or the burst
-        // budget elapses. HP reads ~1.7 MB (~2.1 s at wire rate) after each
-        // imaging latch before sending the next command; with no finger the sensor
-        // streams baseline frames indefinitely, so the time bound is what ends it.
-        drain_image_bounded(dev, &mut img, 3, EP2_BURST_MS);
-        let slice = &img[before..];
-        let (mean, sd) = mean_sd(slice);
-        if !slice.is_empty() {
+            // send_cmd handles the imaging-latch re-enumeration: reopen the handle and
+            // re-handshake a fresh session (the reset drops the old one), then resend.
+            // Experiment: VFS_NO_REHANDSHAKE reopens but does NOT re-handshake, to test
+            // whether the sensor enters an imaging mode that streams EP2 frames without
+            // a fresh session (i.e. whether the re-handshake is what causes the reset loop).
+            let recover = if std::env::var("VFS_NO_REHANDSHAKE").is_ok() { None } else { Some(self.cfg) };
+            let mut img = Vec::new(); // this command's raw (encrypted) EP2 bytes
+            match send_cmd_draining(self.dev, self.rec, &plain, recover, Some(&mut img)) {
+                Some((_, RESET_SKIPPED)) => {
+                    log::info!(
+                        "[{i:3}] cmd=0x{cmd_op:02x} -> RE-ENUM, skipped (HP-resume); next cmd tests session survival"
+                    );
+                }
+                Some((payload, status)) => {
+                    let ok = status_is_ok(status);
+                    log::info!(
+                        "[{i:3}] cmd=0x{cmd_op:02x} -> status=0x{status:04x} payload={}B {}",
+                        payload.len(),
+                        if ok { "OK" } else { "**REJECT**" }
+                    );
+                }
+                None => {
+                    cue_led(false);
+                    anyhow::bail!("[{i}] cmd 0x{cmd_op:02x} write failed after recovery");
+                }
+            }
+            // Keep draining until EP2 has been quiet for a few reads, or the burst
+            // budget elapses. HP reads ~1.7 MB (~2.1 s at wire rate) after each
+            // imaging latch before sending the next command; with no finger the sensor
+            // streams baseline frames indefinitely, so the time bound is what ends it.
+            drain_image_bounded(self.dev, &mut img, 3, EP2_BURST_MS);
+            let slice = &img[..];
+            if slice.is_empty() {
+                continue;
+            }
+            let (mean, sd) = mean_sd(slice);
             log::info!("[{i:3}]   EP2 +{}B mean={mean:.1} sd={sd:.1}", slice.len());
             // Diagnostic: dump each command's raw EP2 slice (calibration RE).
             if let Ok(dir) = std::env::var("VFS_DUMP_SLICES") {
@@ -532,29 +582,40 @@ pub fn arm_capture(
             // result and carry it into the remaining commands (see calib.rs).
             // VFS_NO_CALIB replays the recorded values instead (A/B diagnostic).
             let calib = std::env::var("VFS_NO_CALIB").is_err();
-            if let Some(applied) = calib
-                .then(|| crate::calib::carry_forward(i, slice, &mut seq[i + 1..]))
-                .flatten()
+            if let Some(applied) =
+                calib.then(|| crate::calib::carry_forward(i, slice, &mut self.seq[i + 1..])).flatten()
             {
                 log::info!("[{i:3}]   calibration: {applied}");
             }
             // Decrypt this command's EP2 slice under the active image key, chaining
             // the CBC IV forward for the next slice (matches HP's per-read decrypt).
-            if let Some(k) = cur_key {
-                let pt = crate::crypto::decrypt_image_stream(&k, &cur_iv, slice);
+            if let Some(k) = self.cur_key {
+                let pt = crate::crypto::decrypt_image_stream(&k, &self.cur_iv, slice);
                 if slice.len() >= 16 {
-                    cur_iv.copy_from_slice(&slice[slice.len() - 16..]);
+                    self.cur_iv.copy_from_slice(&slice[slice.len() - 16..]);
                 }
                 out.extend_from_slice(&pt);
             }
         }
+        Ok(out)
     }
-    log::info!(
-        "capture replayed ({} commands, {} raw EP2 bytes, {} decrypted image bytes)",
-        seq.len(),
-        img.len(),
-        out.len()
-    );
+}
+
+/// One whole recorded capture: calibration, the two imaging windows, closing
+/// commands. Returns the decrypted image line stream of both windows. A finger
+/// must be swiping during a window for real frames to appear.
+pub fn arm_capture(
+    dev: &mut Sensor,
+    rec: &mut Record,
+    base: &Path,
+    cfg: &crate::session::Config,
+) -> Result<Vec<u8>> {
+    let mut cap = Capture::new(dev, rec, base, cfg)?;
+    cue(Cue::DontTouch, cap.prompt);
+    let n = cap.seq.len();
+    let out = cap.run(0..n)?;
+    cue(Cue::DontTouch, cap.prompt);
+    log::info!("capture replayed ({n} commands, {} decrypted image bytes)", out.len());
     Ok(out)
 }
 

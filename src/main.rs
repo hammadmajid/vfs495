@@ -108,6 +108,12 @@ enum Command {
     /// Run continuously as a feeder: capture on each finger touch, decode, and
     /// push the image to libfprint's virtual_image socket so fprintd/PAM/GDM can
     /// enroll and verify. Idle cycles (no finger) are skipped quietly.
+    /// Diagnostic: calibrate once, then open N imaging windows back to back and
+    /// print what each returned (tests window repetition without recalibration).
+    WindowTest {
+        #[arg(long, default_value_t = 6)]
+        count: usize,
+    },
     Daemon {
         /// Socket path (defaults to $FP_VIRTUAL_IMAGE).
         #[arg(long)]
@@ -263,6 +269,32 @@ fn main() -> Result<()> {
             virtimage::send_image(&sock, &fpx, fw as u32, fh as u32)?;
             println!("[+] captured a {w}x{h} swipe ({contact} contact rows) and fed {fw}x{fh} to virtual_image");
         }
+        Command::WindowTest { count } => {
+            let mut dev = usb::Sensor::open()?;
+            let mut rec = session::handshake(&dev, &cfg)?;
+            let dli = image::DliConfig::load_main(&cli.base)?;
+            let mut cap = capture::Capture::new(&mut dev, &mut rec, &cli.base, &cfg)?;
+            let t0 = std::time::Instant::now();
+            cap.prepare()?;
+            println!("[i] prepared in {:.1}s", t0.elapsed().as_secs_f32());
+            for n in 0..count {
+                let t = std::time::Instant::now();
+                let stream = cap.window()?;
+                let lines = image::decode_ep2(&stream, 272, &dli);
+                let swipe = swipe::reconstruct_swipe(&lines).map(|(_, w, h)| format!("{w}x{h}"));
+                println!(
+                    "[i] window {n}: {:.1}s, {} bytes, {} lines, {} contact rows, median line sd {:.1}, swipe {:?}",
+                    t.elapsed().as_secs_f32(),
+                    stream.len(),
+                    lines.rows,
+                    lines.contact_rows(image::CONTACT_SD),
+                    lines.median_line_std(),
+                    swipe
+                );
+            }
+            cap.finish()?;
+            println!("[+] finished after {:.1}s", t0.elapsed().as_secs_f32());
+        }
         Command::Daemon { socket, min_contact, once, gap, fprintd } => {
             let sock = resolve_socket(socket)?;
             run_daemon(&cli.base, &cfg, &sock, min_contact, once, gap, fprintd)?;
@@ -282,48 +314,26 @@ fn finger_gate(lines: &image::Lines, min_contact: usize) -> (bool, usize) {
     (lines.rows >= 60 && contact >= min_contact, contact)
 }
 
-/// Capture one frame from the sensor and decode it to a reconstructed image,
-/// reusing an already-open device and SSL session. Returns `Ok(None)` when the
-/// capture holds no finger (too few decoded lines / low ridge), so the daemon can
-/// skip idle cycles without treating them as errors. A USB/session error is
-/// returned as `Err` for the caller to recover from (re-open + re-handshake) —
-/// reusing one session across captures avoids the per-capture open/handshake churn
-/// that was re-enumerating the sensor.
-fn capture_frame(
-    dev: &mut usb::Sensor,
-    rec: &mut crypto::Record,
-    base: &std::path::Path,
-    cfg: &session::Config,
-    dli: &image::DliConfig,
-    min_contact: usize,
-) -> Result<Option<(Vec<u8>, u32, u32)>> {
-    // Fire the full imaging capture. The WOE poll gate (poll seq[17] and watch for
-    // reply divergence) was falsified on hardware — that poll is finger-blind, so
-    // there is no pre-latch signal to gate on (see docs/STATUS.md §7). We instead
-    // image every cycle and decide from the picture; firing the latch per cycle is
-    // safe (the "latch stresses the sensor" premise was falsified in session 4).
-    let stream = capture::arm_capture(dev, rec, base, cfg)?;
-    let lines = image::decode_ep2(&stream, 272, dli);
-    if lines.rows < 60 {
-        log::debug!("skip: no finger (only {} decoded lines)", lines.rows);
-        return Ok(None);
-    }
-    // Gate on finger contact rows: with the fixed column pattern removed, a blank
-    // sensor is quiet (row sd ~4) and a swiped finger's rows are ~25-60. (The old
-    // ridge_peak gate measured noise statistics, not ridges — NOTES 2026-10-01.)
+/// Decide whether one imaging window holds a usable swipe and, if so, turn it
+/// into the image to feed libfprint. Gate on finger contact rows: with the fixed
+/// column pattern removed, a blank sensor is quiet (row sd ~4) and a swiped
+/// finger's rows are ~25-60. (The old ridge_peak gate measured noise statistics,
+/// not ridges — NOTES 2026-10-01.)
+fn swipe_from_window(stream: &[u8], dli: &image::DliConfig, min_contact: usize) -> Option<(Vec<u8>, u32, u32)> {
+    let lines = image::decode_ep2(stream, 272, dli);
     let (accept, contact) = finger_gate(&lines, min_contact);
     if !accept {
-        log::debug!("skip: no finger ({contact} contact rows < {min_contact})");
-        return Ok(None);
+        log::debug!("no finger in this window ({contact} contact rows < {min_contact})");
+        return None;
     }
     let Some((px, w, h)) = swipe::reconstruct_swipe(&lines) else {
-        log::info!("skip: finger touched but did not swipe ({contact} contact rows, no motion)");
-        return Ok(None);
+        log::info!("finger touched but did not swipe ({contact} contact rows, no motion)");
+        return None;
     };
-    // Clamp the pixels we actually feed to a libfprint-acceptable height.
+    // Enlarge and clamp the pixels we actually feed to a libfprint-acceptable height.
     let (fpx, fw, fh) = image::window_for_feed(&px, w, h);
     log::info!("finger captured: {w}x{h} ({contact} contact rows); feeding {fw}x{fh}");
-    Ok(Some((fpx, fw as u32, fh as u32)))
+    Some((fpx, fw as u32, fh as u32))
 }
 
 /// (Re)establish a live session: recover the device (waiting out any USB
@@ -337,11 +347,54 @@ fn reestablish(dev: &mut usb::Sensor, cfg: &session::Config) -> Result<crypto::R
     session::handshake(dev, cfg)
 }
 
-/// Feeder loop: capture on each finger touch and push the image to libfprint's
-/// virtual_image socket. The device is opened and the SSL session established
-/// ONCE and reused across captures (per-capture open/handshake churn was
-/// re-enumerating the sensor). A capture error rebuilds the session and continues,
-/// so the daemon survives a re-enumeration or an fprintd restart.
+/// Imaging windows opened for one request before recalibrating (~4 s each).
+const MAX_WINDOWS_PER_REQUEST: usize = 30;
+/// After feeding a swipe, how long to wait for the next scan of the same
+/// request (the next enroll stage, or a retry) before closing the capture.
+const NEXT_SCAN_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Serve one fingerprint request: calibrate once, then open imaging windows back
+/// to back, feeding each swipe as soon as its window closes, until nothing is
+/// waiting for a finger any more. Returns the number of swipes fed.
+fn serve_request(
+    cap: &mut capture::Capture,
+    mut listener: std::os::unix::net::UnixStream,
+    sock: &str,
+    dli: &image::DliConfig,
+    min_contact: usize,
+    fprintd: bool,
+    once: bool,
+) -> Result<usize> {
+    cap.prepare()?;
+    let mut fed = 0;
+    for _ in 0..MAX_WINDOWS_PER_REQUEST {
+        if !virtimage::still_wanted(&listener, fprintd) {
+            break;
+        }
+        let stream = cap.window()?;
+        let Some((px, w, h)) = swipe_from_window(&stream, dli, min_contact) else { continue };
+        match virtimage::send_on(&mut listener, &px, w, h) {
+            Ok(()) => fed += 1,
+            Err(e) => log::warn!("captured {w}x{h} but the request was gone: {e}"),
+        }
+        if once {
+            break;
+        }
+        // One image per connection: reconnect for the next scan, if one follows.
+        match virtimage::wait_for_request(sock, fprintd, Some(NEXT_SCAN_WAIT)) {
+            Some(next) => listener = next,
+            None => break,
+        }
+    }
+    cap.finish()?;
+    Ok(fed)
+}
+
+/// Feeder loop: when a fingerprint is requested, capture swipes and push them to
+/// libfprint's virtual_image socket. The device is opened and the SSL session
+/// established ONCE and reused across captures (per-capture open/handshake churn
+/// was re-enumerating the sensor). A capture error rebuilds the session and
+/// continues, so the daemon survives a re-enumeration or an fprintd restart.
 fn run_daemon(
     base: &std::path::Path,
     cfg: &session::Config,
@@ -351,7 +404,7 @@ fn run_daemon(
     gap: u64,
     fprintd: bool,
 ) -> Result<()> {
-    // Suppress the interactive capture prompt; the host UI drives the user.
+    // No terminal cues; the swipe cue is the LED (VFS_CUE_LED).
     std::env::set_var("VFS_NO_PROMPT", "1");
     let dli = image::DliConfig::load_main(base)?;
     log::info!("vfs495 feeder daemon: socket {sock}, min_contact {min_contact}");
@@ -362,20 +415,18 @@ fn run_daemon(
     loop {
         // Capture only while something is waiting for a fingerprint: the sensor
         // stays idle otherwise, and no stale image is ever queued.
-        let mut listener = virtimage::wait_for_request(sock, fprintd);
-        log::info!("fingerprint requested; capturing");
-        match capture_frame(&mut dev, &mut rec, base, cfg, &dli, min_contact) {
-            Ok(Some((px, w, h))) => match virtimage::send_on(&mut listener, &px, w, h) {
-                Ok(()) => log::info!("fed {w}x{h} image to virtual_image"),
-                Err(e) => log::warn!("captured {w}x{h} but the request was gone: {e}"),
-            },
-            Ok(None) => log::info!("no usable swipe this cycle"),
+        let Some(listener) = virtimage::wait_for_request(sock, fprintd, None) else { continue };
+        log::info!("fingerprint requested; calibrating, then recording swipes");
+        let served = capture::Capture::new(&mut dev, &mut rec, base, cfg)
+            .and_then(|mut cap| serve_request(&mut cap, listener, sock, &dli, min_contact, fprintd, once));
+        match served {
+            Ok(fed) => log::info!("request served: {fed} swipe(s) fed"),
             Err(e) => {
                 // The session/device faulted (e.g. the sensor dropped off the bus).
                 // Rebuild it rather than tight-looping: back off (also lets a USB
                 // re-enumeration settle), then re-open + re-handshake. On persistent
                 // failure keep retrying at a readable rate instead of spinning.
-                log::warn!("capture cycle failed: {e}; rebuilding session");
+                log::warn!("capture failed: {e}; rebuilding session");
                 std::thread::sleep(std::time::Duration::from_secs(gap.max(3)));
                 match reestablish(&mut dev, cfg) {
                     Ok(new_rec) => {
