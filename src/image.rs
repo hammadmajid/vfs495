@@ -183,8 +183,7 @@ impl Lines {
     }
 
     /// Rows of the main sensing columns with the fixed column pattern (per-column
-    /// median) removed, plus each row's std. Shared by the gate and the swipe
-    /// reconstruction.
+    /// median) removed, plus each row's std.
     fn contact_rows_bg(&self) -> (Vec<Vec<f32>>, Vec<f32>) {
         let cols = self.cols.min(CONTACT_COLS);
         if self.rows == 0 || cols == 0 {
@@ -224,64 +223,6 @@ const CONTACT_COLS: usize = 200;
 /// Row std (fixed pattern removed) that counts as finger contact: a blank
 /// sensor is ~4-10, a finger's rows ~25-60.
 pub const CONTACT_SD: f32 = 25.0;
-/// Fewest de-stretched rows that make a usable print.
-const MIN_SWIPE_ROWS: usize = 64;
-
-/// Reconstruct a swipe into a fingerprint image with one row per row of skin.
-///
-/// The sensor scans lines far faster than a finger moves, so a raw swipe repeats
-/// each skin row many times (images come out ~6-10x stretched, and a finger held
-/// still is one row repeated). Within each run of finger-contact rows, keep a
-/// row only once it differs from the last kept row by at least 0.35 × the run's
-/// median contact std (≈12 grey levels for a firm swipe, vs ~5 line-to-line
-/// noise) — i.e. once the finger has moved. The run yielding the most rows wins
-/// (a capture spans two swipe windows). Returns `None` without a usable swipe.
-/// Validated on a live swipe: 6258 contact rows -> a 200x331 loop-pattern print.
-pub fn reconstruct_swipe(lines: &Lines) -> Option<(Vec<u8>, usize, usize)> {
-    let (rows, sd) = lines.contact_rows_bg();
-    let mut best: Vec<&Vec<f32>> = Vec::new();
-    let mut y = 0;
-    while y < rows.len() {
-        if sd[y] < CONTACT_SD {
-            y += 1;
-            continue;
-        }
-        let start = y;
-        while y < rows.len() && sd[y] >= CONTACT_SD {
-            y += 1;
-        }
-        let mut run_sd = sd[start..y].to_vec();
-        run_sd.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let thr = 0.35 * run_sd[run_sd.len() / 2];
-        let mut kept: Vec<&Vec<f32>> = Vec::new();
-        for row in &rows[start..y] {
-            let moved = kept.last().map_or(true, |last| {
-                row.iter().zip(last.iter()).map(|(a, b)| (a - b).abs()).sum::<f32>() / row.len() as f32 >= thr
-            });
-            if moved {
-                kept.push(row);
-            }
-        }
-        if kept.len() > best.len() {
-            best = kept;
-        }
-    }
-    if best.len() < MIN_SWIPE_ROWS {
-        return None;
-    }
-    // Global 1st-99th percentile contrast stretch.
-    let mut all: Vec<f32> = best.iter().flat_map(|r| r.iter().copied()).collect();
-    all.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let (lo, hi) = (all[all.len() / 100], all[all.len() * 99 / 100]);
-    let span = (hi - lo).max(1e-3);
-    let w = best[0].len();
-    let px = best
-        .iter()
-        .flat_map(|r| r.iter().map(|&v| ((v - lo) / span * 255.0).clamp(0.0, 255.0) as u8))
-        .collect();
-    Some((px, w, best.len()))
-}
-
 /// Parse a `lines.raw`-format buffer: repeated `<u16 LE width><width bytes>`
 /// (the descrambled output of [`unpack_line`] / HP's UnpackLineRT).
 pub fn load_lines_raw(buf: &[u8]) -> Lines {
@@ -548,12 +489,43 @@ pub fn reconstruct(lines: &Lines, crop: bool) -> (Vec<u8>, usize, usize) {
     (px, cropped.cols, cropped.rows)
 }
 
-/// Clamp an image to a central `MAX_FEED_ROWS` window so libfprint accepts it.
-/// Applied only to the pixels that get *fed*, after the finger gate has already
-/// been decided on the full image. A shorter image is returned unchanged.
-pub fn window_for_feed(px: &[u8], w: usize, h: usize) -> (Vec<u8>, usize, usize) {
-    if h <= MAX_FEED_ROWS {
+/// Enlargement applied to a reconstructed swipe before it is fed to libfprint.
+/// NBIS finds too few stable minutiae in a 200-px-wide 508 dpi strip (libfprint's
+/// own narrow swipe drivers enlarge theirs for the same reason). Empirical, from
+/// four recorded swipes of one finger: best genuine bozorth3 score 9 at 1x, 26 at
+/// 1.5x, 14 at 2x (NOTES.md 2026-10-03).
+pub const FEED_SCALE: f32 = 1.5;
+
+/// Bilinear resize by `factor`.
+pub fn upscale(px: &[u8], w: usize, h: usize, factor: f32) -> (Vec<u8>, usize, usize) {
+    let (nw, nh) = ((w as f32 * factor) as usize, (h as f32 * factor) as usize);
+    if w < 2 || h < 2 || nw == 0 || nh == 0 {
         return (px.to_vec(), w, h);
+    }
+    let mut out = Vec::with_capacity(nw * nh);
+    for y in 0..nh {
+        let sy = ((y as f32 + 0.5) / factor - 0.5).clamp(0.0, (h - 1) as f32);
+        let y0 = (sy as usize).min(h - 2);
+        let fy = sy - y0 as f32;
+        for x in 0..nw {
+            let sx = ((x as f32 + 0.5) / factor - 0.5).clamp(0.0, (w - 1) as f32);
+            let x0 = (sx as usize).min(w - 2);
+            let fx = sx - x0 as f32;
+            let p = |yy: usize, xx: usize| px[yy * w + xx] as f32;
+            let top = (1.0 - fx) * p(y0, x0) + fx * p(y0, x0 + 1);
+            let bot = (1.0 - fx) * p(y0 + 1, x0) + fx * p(y0 + 1, x0 + 1);
+            out.push(((1.0 - fy) * top + fy * bot).round() as u8);
+        }
+    }
+    (out, nw, nh)
+}
+
+/// Prepare a reconstructed swipe for libfprint: enlarge by [`FEED_SCALE`], then
+/// clamp to a central `MAX_FEED_ROWS` window (a taller image is rejected).
+pub fn window_for_feed(px: &[u8], w: usize, h: usize) -> (Vec<u8>, usize, usize) {
+    let (px, w, h) = upscale(px, w, h, FEED_SCALE);
+    if h <= MAX_FEED_ROWS {
+        return (px, w, h);
     }
     let a = (h - MAX_FEED_ROWS) / 2;
     let b = a + MAX_FEED_ROWS;
@@ -571,41 +543,17 @@ pub fn write_pgm(path: &str, pixels: &[u8], cols: usize, rows: usize) -> std::io
 #[cfg(test)]
 mod tests {
 
-    /// Synthetic capture: `blank` quiet rows, then a ridge pattern (period 10
-    /// columns) sliding `step` skin-rows per sensor line for `moving` lines.
-    fn swipe_lines(blank: usize, moving: usize, step: f32) -> Lines {
-        let cols = 264;
-        let mut data = Vec::new();
-        for y in 0..blank + moving {
-            for x in 0..cols {
-                let v = if y < blank {
-                    128.0 + ((x * 7 + y * 3) % 5) as f32
-                } else {
-                    let skin = (y - blank) as f32 * step;
-                    128.0 + 50.0 * ((x as f32 + skin) * std::f32::consts::TAU / 10.0).sin()
-                };
-                data.push(v);
-            }
-        }
-        Lines { data, rows: blank + moving, cols }
-    }
-
-    #[test]
-    fn swipe_is_destretched_held_and_blank_are_rejected() {
-        // Finger moving 0.1 skin-row per line over 3000 lines = ~300 skin rows.
-        let (_, _, h) = reconstruct_swipe(&swipe_lines(4000, 3000, 0.1)).expect("swipe");
-        assert!((150..=450).contains(&h), "de-stretched height {h}");
-        // Held still: contact but no motion.
-        assert!(reconstruct_swipe(&swipe_lines(4000, 3000, 0.0)).is_none());
-        // Blank sensor.
-        assert!(reconstruct_swipe(&swipe_lines(7000, 0, 0.0)).is_none());
-        assert_eq!(swipe_lines(7000, 0, 0.0).contact_rows(CONTACT_SD), 0);
-    }
-
     use super::*;
 
     fn identity_perm(n: usize) -> Vec<i16> {
         (0..n as i16).collect()
+    }
+
+    #[test]
+    fn upscale_resizes_and_keeps_flat_areas_flat() {
+        let (px, w, h) = upscale(&[200u8; 20 * 10], 20, 10, 1.5);
+        assert_eq!((w, h), (30, 15));
+        assert!(px.iter().all(|&v| v == 200));
     }
 
     #[test]

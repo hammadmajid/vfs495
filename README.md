@@ -55,7 +55,8 @@ See [`NOTES.md`](NOTES.md) for the full reverse-engineering log and evidence.
 | `src/usb.rs`      | libusb transport (EP1 OUT/IN, EP2 image)                              |
 | `src/session.rs`  | init replay + open handshake → active record layer                    |
 | `src/capture.rs`  | in-session capture command + EP2 stream read                          |
-| `src/image.rs`    | `UnpackLineRT` port (mode 4/8/general), descramble, assembly, reconstruction → PGM |
+| `src/image.rs`    | `UnpackLineRT` port (mode 4/8/general), descramble, assembly, finger-contact gate → PGM |
+| `src/swipe.rs`    | swipe reconstruction at true scale (finger speed from the secondary sensing line) |
 | `src/virtimage.rs`| feed a decoded image to `$FP_VIRTUAL_IMAGE`                           |
 
 The crypto is validated **byte-exact** against a live trace of HP's binary — run
@@ -105,6 +106,7 @@ vfs495 handshake
 # 4. Capture a swipe and decode it to a PGM
 vfs495 capture --out capture.bin
 vfs495 decode --input capture.bin --out fingerprint.pgm    # unpack + descramble + reconstruct
+#   add --feed to write the image exactly as it is fed to libfprint (1.5x enlarged)
 
 # ...or reconstruct from already-descrambled scan lines (fully-open, verifiable offline):
 vfs495 decode-lines --input captures/lines.raw --out fingerprint.pgm
@@ -182,8 +184,14 @@ command stream, and that let the no-finger noise drift up into the finger range.
   and the descrambled-lines path reconstructs a real fingerprint (`decode-lines`,
   ridge period ~14 px). The DLI config is confirmed on-device with
   `scripts/dump_dli_config.gdb.py` (→ `captures/dli_config.json`, auto-loaded).
-  A firm, slow swipe is needed for a full-height image; light swipes yield mostly
-  baseline lines (which the finger-segment crop drops).
+  A firm, steady swipe is needed for a full-height image.
+- **Swipe reconstruction follows HP's method but matching is unproven.**
+  `src/swipe.rs` measures finger speed from the sensor's second sensing line (8
+  rows upstream of the imaging line) and resamples to square 50 µm pixels, so
+  swipes of different speed come out at the same scale. Different swipes of one
+  finger do not yet reach libfprint's match threshold on the recorded test swipes
+  (best score 27 of 40; see `docs/STATUS.md` §0). `scripts/loo_match.py` runs
+  the offline match test.
 - **Unowned sensors only.** Owned sensors need the pairing (`TakeOwnership`) flow
   — fully mapped in `NOTES.md` but not implemented, since it is a persistent,
   cycle-limited sensor write.

@@ -3,7 +3,7 @@
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
-use vfs495::{capture, crypto, image, session, usb, virtimage};
+use vfs495::{capture, crypto, image, session, swipe, usb, virtimage};
 
 #[derive(Parser)]
 #[command(name = "vfs495", version, about = "Open userspace driver for the Validity VFS495 (138a:003f)")]
@@ -73,6 +73,9 @@ enum Command {
         /// Keep the full frame instead of cropping to the finger band.
         #[arg(long)]
         no_crop: bool,
+        /// Write the image exactly as `run`/`daemon` would feed it to libfprint.
+        #[arg(long)]
+        feed: bool,
     },
     /// Decode already-descrambled scan lines (`<u16 w><w bytes>` records) to PGM.
     /// Fully-open path from UnpackLineRT output to a fingerprint image.
@@ -170,7 +173,7 @@ fn main() -> Result<()> {
                 bail!("no lines decoded — capture produced no frames");
             }
             let (gate, contact) = finger_gate(&lines, min_contact);
-            let swipe = image::reconstruct_swipe(&lines);
+            let swipe = swipe::reconstruct_swipe(&lines);
             let verdict = gate && swipe.is_some();
             let (px, w, h) = swipe.unwrap_or_else(|| image::reconstruct(&lines, true));
             let ridge = image::ridge_peak(&px, w, h);
@@ -185,7 +188,7 @@ fn main() -> Result<()> {
             image::write_pgm(out.to_str().unwrap(), &px, w, h)?;
             println!("[+] wrote {} for visual inspection", out.display());
         }
-        Command::Decode { input, out, stride, no_crop } => {
+        Command::Decode { input, out, stride, no_crop, feed } => {
             let raw = std::fs::read(&input)?;
             let cfg = image::DliConfig::load_main(&cli.base)?;
             let lines = image::decode_ep2(&raw, stride, &cfg);
@@ -201,7 +204,7 @@ fn main() -> Result<()> {
                     lines.contact_rows(25.0)
                 );
             }
-            let (px, w, h) = match (no_crop, image::reconstruct_swipe(&lines)) {
+            let (px, w, h) = match (no_crop, swipe::reconstruct_swipe(&lines)) {
                 (false, Some(img)) => img,
                 (false, None) => {
                     println!("[!] no usable swipe (finger moving across the sensor); writing the raw band");
@@ -209,6 +212,7 @@ fn main() -> Result<()> {
                 }
                 (true, _) => image::reconstruct(&lines, false),
             };
+            let (px, w, h) = if feed { image::window_for_feed(&px, w, h) } else { (px, w, h) };
             image::write_pgm(out.to_str().unwrap(), &px, w, h)?;
             println!("[+] wrote {} ({}x{})", out.display(), w, h);
         }
@@ -241,7 +245,7 @@ fn main() -> Result<()> {
             if !accept {
                 bail!("no finger detected ({contact} contact rows < {DEFAULT_MIN_CONTACT}) — nothing fed");
             }
-            let Some((px, w, h)) = image::reconstruct_swipe(&lines) else {
+            let Some((px, w, h)) = swipe::reconstruct_swipe(&lines) else {
                 bail!("finger touched but did not swipe ({contact} contact rows, no motion) — nothing fed");
             };
             let (fpx, fw, fh) = image::window_for_feed(&px, w, h);
@@ -307,7 +311,7 @@ fn capture_frame(
         log::debug!("skip: no finger ({contact} contact rows < {min_contact})");
         return Ok(None);
     }
-    let Some((px, w, h)) = image::reconstruct_swipe(&lines) else {
+    let Some((px, w, h)) = swipe::reconstruct_swipe(&lines) else {
         log::info!("skip: finger touched but did not swipe ({contact} contact rows, no motion)");
         return Ok(None);
     };

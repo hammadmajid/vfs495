@@ -13,6 +13,7 @@ pub mod capture;
 pub mod crypto;
 pub mod image;
 pub mod session;
+pub mod swipe;
 pub mod usb;
 pub mod virtimage;
 

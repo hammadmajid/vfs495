@@ -1548,3 +1548,66 @@ simple time-lagged copy of the main line (windowed NCC search: no consistent x/l
 HP has a software reconstructor: IRreconstructImage @0x468ff0, vcsImageGetSwipeSpeed,
 DecideSpeed, gSwipeSpeed, idsSensorPickImageReconstructor — being RE'd (agent).
 `vfs495 run` with VFS_SAVE_FED now also saves the decrypted stream (fed_<ts>.stream).
+
+### 2026-10-03 — session 11: HP's swipe reconstruction RE'd and ported (`src/swipe.rs`); scale now consistent, match still < threshold
+**RE result (static + two gdb runs of `get_ownership_info -doinit`, breakpoints only).**
+`_scsDetermineFlexId` returns flex id 0x13 (confirmed live, break @0x4ed4c9); its
+`gFlexInfo` entry @0x86d360: +0x04 = 68 (secondary→primary pixel offset), +0x08 = 400 µm
+(line separation), +0x0a/+0x0c = 50 µm pitch, +0x0e/+0x10 = 508 dpi, +0x14 = 4 (selects
+the real-time DLI), +0x22 = 200 primary pixels, +0x32 = 64 secondary pixels. Layout tables
+`PriPixelLayout_VFS4xx_12A` 0x542a40, `SecPixelLayout_VFS4xx_12A` 0x542be0,
+`SecToPriMap_VFS4xx_12A` 0x542c60. Call chain: `idsSensorPickImageReconstructor` →
+`idsStartupIr` → `irDliRTStartup`; per line `irDliData` → `irDliRTFalconData` →
+`UnpackLineRT` → `vcsDoIR` (0x463060) → `vcsParseSensorHeader`, `vcsCullScanLine`
+(0x471660), `IRprocessScanline` (0x46aac0) → `IRcorrelate{Up,Down,UpDown}` (direction from
+[ir+0x26], set in `vcsResetIR` 0x462f96; window from `setupCorrParams` 0x463f10); at the
+end `IRreconstructImage` (0x468ff0) → `IRfinalizeYlagEstimates`/`IRfinalizeXlagEstimates`
+→ `IRpostProcessImage`. So the "224..264 strip of unknown role" is a **second sensing
+line 8 rows upstream**: `ProcessTimeslotTable` (0x46f1c0) builds the unscramble table as
+200 primary + 64 secondary; secondary pixels are stored inverted (NOT @0x46ad44).
+`vcsInitIR` computes base lag = separation/pitch and fails (0xcc) unless it is 8
+(0x46399a-0x4639b4). `IRreconstructImage` maps lag 1..21 (`cmp sil,0x15`) to insert/delete
+duty cycles (`dutyCycleInsDelSep8` 0x542240, `retInsDelSep8` 0x542280): lag > 8 deletes
+lines (9 → 1 in 9, 16 → 1 in 2), lag < 8 inserts (4 → 1 per line). Cull defaults
+[ir+0xb8] = 2, [ir+0xb9] = 0x19 (set @0x463adc): keep a line once >= 2 of primary pixels
+10..189 differ from the last kept line by > 25. The 8-byte line header has no motion or
+time data (line counter only; HP uses it as time via `keep32BitSensorTime`). An
+external-lag mode ([ir+0x48]) exists but is unused here.
+
+**Why the earlier "not a time-lagged copy" check failed:** it compared the strip against
+the wrong primary columns and without inverting it.
+
+**Port (`src/swipe.rs`)** — same model at sub-line precision instead of HP's integer
+tables: cull; windowed NCC (31) of inverted secondary vs primary at lag 2..160 and lateral
+shift ±3; Viterbi lag track (step 3, penalty 0.02) + parabola refinement; a lag counts
+only if NCC >= 0.5, secondary row sd >= 15, lag >= 4 and the NCC halfway to zero lag is
+lower by >= 0.15; nearest accepted lag held up to 1.5·L lines; y = Σ 8/L, x = Σ dx/L;
+linear resample. In our decoded layout (perm_264.bin) the live secondary columns are
+226..262 minus 240/250 and column c sits over primary c-131 (data fit). The x
+correction matters (off or sign-flipped: genuine-pair NCC 0.6 → 0.2-0.4).
+The Rust port reproduces the Python prototype's image heights (226/170/168/179/206/157
+vs 226/169/168/179/206/157). Unit test: the same synthetic skin swiped at 0.1 and 0.3
+rows/line reconstructs to the same height (±5%); held finger and blank are rejected.
+
+**Validation on recorded swipes** (`captures/swipe_*.bin`, local only: HP's 5 runs from
+cmd33/cmd37 + the live swipe of 2026-10-01):
+- isotropy (ridge period y/x; 1 = correct): mean 1.33 → 0.99 (noisy metric, ±20%).
+- same-finger relative vertical scale (best NCC): 0.965-1.04 (was 0.70-1.40 on the live
+  set); pair NCC 0.53-0.67 vs ~0.2 unrelated. hp37c is a different finger/area.
+- libfprint (virtual_image, bozorth3 threshold 40), leave-one-out over the 4 same-finger
+  HP swipes (`scripts/loo_match.py`): genuine scores 3-9 at native size, **11-27 after a
+  1.5x enlargement** (14-21 at 2x; a Gaussian pre-blur gave 33 for the best pair but is
+  not adopted — too little data to tune on); impostors <= 7; control 81-144.
+  -> `image::FEED_SCALE = 1.5` in the feed path. **No genuine match yet.**
+Caveat: those 4 swipes are fingertip-only partials (little overlap, few minutiae), so
+they bound nothing about full-pad swipes. The six full-pad swipes of 2026-10-02 have no
+raw streams. `run` now saves streams (`VFS_SAVE_FED`), so the next live run is replayable.
+
+**Falsified:** staggered even/odd pixel rows as the cause of the "beaded" horizontal
+ridges — best time lag between adjacent columns is the same for even and odd columns
+(2.0 / 2.0 lines on hp33b, -2/-2 on hp37a, 4/4 live).
+
+**Not ported / open:** HP's other cull tests (reason codes 5/7/8/9/11, runtime flags not
+observable without a finger), `IRfinalize*Estimates` smoothing (stiction/noise zones),
+`IRpostProcessImage`. Absolute scale rests on the 400/50 = 8 constant (no HP-reconstructed
+image to compare against).

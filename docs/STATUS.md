@@ -12,11 +12,13 @@ yields a real fingerprint image (session 10; earlier "real print" / "enrolls +
 verifies" claims from held-finger captures were noise self-matching). The
 former blocker — the no-finger ridge baseline drifting into the finger range — is
 fixed (session 10): calibration is now computed per session from our own sweep
-frames (open ports of HP's step functions). Finger detection now gates on contact rows. Next: live enroll with swipes (§0).
+frames (open ports of HP's step functions). Finger detection now gates on contact rows. Swipes are now
+reconstructed at true scale from the sensor's second sensing line (session 11, HP's
+method). Still open: a genuine cross-swipe match through libfprint (§0).
 
 ---
 
-## 0. Resume here (session 10, 2026-10-01)
+## 0. Resume here (session 11, 2026-10-03)
 
 **Where we are:** the no-finger drift blocker is **fixed**. Each capture session now
 runs its own AFE calibration (`src/calib.rs`): the three steps whose results vary
@@ -53,22 +55,44 @@ Live: no finger 0 rows (that same capture had ridge_peak 2.51 — the old gate w
 have falsely fired). ridge_peak is printed as a diagnostic only. All prompts now say
 SWIPE.
 
-**Swipe reconstruction (session 10):** raw swipes were ~6-10x vertically stretched
-(the sensor scans faster than a finger moves). `image::reconstruct_swipe` keeps a row
-only once the finger has moved (diff >= 0.35 x run median contact sd), giving natural
-~200x215-275 prints (user swipe and HP's recorded swipe). A touch without motion is
-refused by `run`/daemon. Cues now print exactly at each imaging window:
-"DO NOT TOUCH" → "SWIPE NOW (1 of 2)" → "SWIPE NOW (2 of 2)" → "Done".
+**Swipe reconstruction (session 10, superseded in session 11):** raw swipes were
+~6-10x vertically stretched (the sensor scans faster than a finger moves). The first
+fix kept a row once it differed enough from the last kept row; that gave each swipe
+its own scale (see below). A touch without motion is refused by `run`/daemon. Cues
+print exactly at each imaging window: "DON'T TOUCH" → "SWIPE ↓" → "WAIT" → "SWIPE ↓".
 
 **Live enroll (2026-10-02):** 5/5 enroll stages accepted from 5 real swipes, but
-**different swipes do not match** (offline leave-one-out on 6 saved swipes: 0/6
-genuine; control self-match OK). Cause: swipe speed. The threshold de-stretch gives
-each swipe a different vertical scale (pairwise 0.70-1.40) and uneven distortion.
+**different swipes did not match** (offline leave-one-out on 6 saved swipes: 0/6
+genuine; control self-match OK). Cause: the threshold de-stretch gave each swipe a
+different vertical scale (pairwise 0.70-1.40).
 
-**NEXT ACTION (offline, no user needed):** port HP's swipe reconstructor
-(`IRreconstructImage` @0x468ff0, `vcsImageGetSwipeSpeed`, `DecideSpeed`) to replace
-`reconstruct_swipe`'s threshold; validate by isotropy + cross-swipe scale ≈1 + the
-leave-one-out match. Then one more `scripts/live_enroll.py` run by the user.
+**Session 11 (2026-10-03) — speed-true reconstruction (`src/swipe.rs`):** HP's
+reconstructor was reverse-engineered and reimplemented. The sensor has a
+**secondary sensing line 8 pixel rows (400 µm) upstream of the primary line** —
+decoded columns 226..262 (inverted; column `c` sits over primary pixel `c-131`).
+Correlating it against later primary lines gives the lag `L` the skin needs to
+travel 8 rows, so the finger moves `8/L` rows per line; rows are resampled at that
+rate, one per 50 µm, with lateral drift corrected too (details §4, NOTES 2026-10-03).
+Results on the recorded swipes (HP's 5 + 1 live; `captures/swipe_*.bin`):
+- natural-looking 200x157-226 prints; same-finger swipes now agree in vertical scale
+  to 0.965-1.04 (was 0.70-1.40); mean isotropy 0.99 (was 1.33).
+- libfprint genuine scores (bozorth3, match >= 40), leave-one-out over the 4
+  same-finger HP swipes: **3-9 before -> 11-27** with the new reconstruction plus a
+  1.5x enlargement before feeding (`image::FEED_SCALE`); impostors stay <= 7.
+  **Still below 40** — but these 4 swipes are fingertip-only partials with little
+  overlap, so this is not the final word. The 6 full-pad live swipes of 2026-10-02
+  cannot be re-run (their raw streams were not saved; they are saved now).
+
+**NEXT ACTION (needs the user's finger):** run `python3 scripts/live_enroll.py`
+(swipe at every green cue, 5 enroll + 1 verify). It keeps every fed image and its
+decrypted stream in the temp dir it prints. Whatever verify says, re-score offline:
+`vfs495 decode --feed --input <stream> --out x.pgm` per stream, then
+`python3 scripts/loo_match.py *.pgm`. If full-pad swipes still score < 40, the
+candidates are (a) image cleanup before feeding (mask the non-finger background,
+drop rows without speed evidence, ridge enhancement), (b) porting HP's remaining
+cull tests / `IRfinalize*Estimates` smoothing, (c) a real libfprint driver instead
+of `virtual_image`, since libfprint's own narrow swipe drivers use a lower match
+threshold than virtual_image's fixed 40 (from memory: ~20-25; verify in the source).
 
 **Sensor access note:** the udev rule is installed (`user:bine:rw-`); it survives
 re-enumeration. If the sensor gets wedged, a full power-off (not just reboot) clears
@@ -192,8 +216,34 @@ show "too few lines" until session 5.
 - **Verified byte-exact:** `scripts/dump_unpack_pairs.gdb.py` — the open
   `dst[perm[i]] = src[i]` unpack reproduces HP's `UnpackLineRT` output on 95/95
   real image lines, 0 mismatches.
-- Reconstruction: fixed-pattern removal + ridge bandpass + finger-segment crop +
-  motion-resample + local-contrast normalize → PGM.
+- (The table is not quite two plain reversals: source 242 maps to column 263, so
+  sources 200..241 land on 262..221 and 243..263 on 220..200.)
+- **Line layout (flex id 0x13, `gFlexInfo` entry @0x86d360):** columns 0..199 =
+  primary line (200 px, 50 µm pitch, 508 dpi); columns 200..263 = 64-slot
+  **secondary line**, 400 µm (8 rows) upstream, stored inverted. Live secondary
+  columns: 226..262 minus 240, 250; column `c` sits over primary pixel `c-131`
+  (data-fitted; HP's `SecToPriMap_VFS4xx_12A` says slot+68, i.e. within a pixel).
+  The 8-byte line header is `01 fe`, u16 line counter, PgaGain echo, a periodic
+  0x10 flag — no motion or timestamp data.
+- **Swipe reconstruction (`src/swipe.rs`, HP's IR model):** per contact run —
+  1. cull static lines (HP `vcsCullScanLine` first test: keep a line once >= 2 of
+     primary pixels 10..189 differ from the last kept line by > 25);
+  2. windowed NCC (31 lines) of secondary(t) vs primary(t±L), L = 2..160 culled
+     lines, lateral shift -3..3; direction = the better-correlating sign;
+  3. Viterbi-track the lag, parabola-refine it; accept a lag only if NCC >= 0.5,
+     the secondary is on skin, and it is an interior peak (L >= 4, NCC halfway to
+     zero lag lower by >= 0.15 — rejects ridges parallel to the swipe / resting finger);
+  4. hold the nearest accepted lag up to 1.5·L lines away, emit nothing beyond;
+  5. position y = Σ 8/L, x = Σ dx/L; interpolate the primary line at integer y.
+  HP instead quantises the lag to 1..21 and inserts/deletes whole lines
+  (`dutyCycleInsDelSep8` @0x542240, `retInsDelSep8` @0x542280); `vcsInitIR`
+  requires separation/pitch == 8. Not ported: HP's further cull tests,
+  `IRfinalizeYlag/XlagEstimates` smoothing, `IRpostProcessImage`.
+- Before feeding libfprint the image is enlarged 1.5x (`image::FEED_SCALE`) and
+  clamped to 500 rows. `vfs495 decode --feed` writes exactly that image.
+- Falsified (2026-10-03): the "beaded" look of horizontal ridges is **not** an
+  even/odd staggered pixel layout — adjacent-column time lags show no parity
+  pattern (even 2.0 / odd 2.0 lines).
 
 ---
 
@@ -214,6 +264,14 @@ show "too few lines" until session 5.
 | `scsGetSecurityParams` | `0x4fd740` | pack key/IV into the SecurityParams TLV |
 | `irDliRTFalconData` | `0x462350` | frame demux/assembly (scans `01fe`) |
 | `UnpackLineRT` | `0x46f510` | line unpack/descramble |
+| `idsSensorPickImageReconstructor` | `0x454dd0` | → `idsStartupIr` → `irDliRTStartup` (flex +0x14 = 4) |
+| `ProcessTimeslotTable` | `0x46f1c0` | builds the unscramble table (200 primary + 64 secondary) |
+| `vcsDoIR` | `0x463060` | per line: parse header, cull, `IRprocessScanline` |
+| `vcsCullScanLine` | `0x471660` | drops lines where the finger has not moved |
+| `IRprocessScanline` | `0x46aac0` | inverts secondary pixels, `IRcorrelateUp/Down` (lag search) |
+| `setupCorrParams` | `0x463f10` | lag search window |
+| `vcsInitIR` | `0x4639xx` | base lag = separation/pitch, must be 8 |
+| `IRreconstructImage` | `0x468ff0` | lag → line insert/delete, x-lag offset, post-process |
 
 HP tracing harness verbs: `getver`, `get_ownership_info`, `getprintwait`,
 `setowner` (writes!). Always `-doinit`.
@@ -228,12 +286,13 @@ HP tracing harness verbs: `getver`, `get_ownership_info`, `getprintwait`,
 | `src/usb.rs` | libusb transport (rusb): EP1 OUT/IN, EP2 image; `read_record` / `read_record_split`; kernel-driver detach/reattach. |
 | `src/session.rs` | init replay + open SSLv3 handshake → active record layer. |
 | `src/capture.rs` | in-session command replay, EP2 decrypt, `arm_capture` (full imaging capture → decrypted stream), `poll_probe` diagnostic. |
-| `src/image.rs` | `UnpackLineRT` port, descramble, assembly, reconstruction → PGM; `ridge_peak`, `median_line_std`. |
+| `src/image.rs` | `UnpackLineRT` port, descramble, assembly, contact gate, feed enlargement → PGM; `ridge_peak` (diagnostic). |
+| `src/swipe.rs` | swipe reconstruction at true scale from the secondary sensing line (§4). |
 | `src/virtimage.rs` | feed a decoded image to `$FP_VIRTUAL_IMAGE`. |
 | `src/main.rs` | CLI: `selftest`, `handshake`, `capture`, `poll-probe`, `ridge-probe`, `decode`, `decode-lines`, `feed`, `run`, `daemon`. |
 
 Toolchain: `libusb1-devel`; non-root USB via `packaging/70-vfs495.rules`.
-6 unit tests pass; clippy-clean.
+16 unit tests pass.
 
 ### Transport fix (session 4)
 The `0x17`/`0x04` imaging latch made EP2 stream data; blocking on an EP1 reply
@@ -373,6 +432,8 @@ libfprint-acceptable, minutiae-friendly image. (A swipe assembles to a few-hundr
 ## 9. Diagnostic env gates (in the driver)
 
 `VFS_NO_PROMPT` (suppress the DO NOT TOUCH / SWIPE NOW cues),
+`VFS_SAVE_FED=<dir>` (`run` keeps each fed image + decrypted stream),
+`VFS_SWIPE_DEBUG` (print per-run cull/lag statistics of the swipe reconstruction),
 `VFS_SKIP_17`, `VFS_NO_REHANDSHAKE`, `VFS_REOPEN_SETCONFIG`, `VFS_HP_RESUME`,
 `VFS_DUMP_SLICES=<dir>` (write each command's raw EP2 slice as `NN_raw.bin`;
 calibration sweep frames are idx 6..12, plaintext), `VFS_NO_CALIB` (replay the
