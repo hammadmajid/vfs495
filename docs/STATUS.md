@@ -90,12 +90,21 @@ leave-one-out: **4 of 6 held-out swipes match** (best scores 40, 57, 57, 40; thr
 40), impostor max 16. The two failures are poor swipes (one stalled mid-swipe and
 smeared, one started below the core — that one was the live verify). Margin is thin.
 
-**NEXT ACTION (offline, data in `captures/swipe_live2_*.bin`):** widen the margin —
-(a) refuse or trim swipes with a stall (lag track jumps) instead of feeding a smeared
-image, (b) check the slant seen in swipes 3-5 (real drift vs a bias in the `c-131`
-column offset), (c) image cleanup (mask background, ridge enhancement), (d) HP's
-`IRfinalize*Estimates` smoothing. Measure each with `scripts/loo_match.py`. Longer
-term: a real libfprint driver (own match threshold) instead of `virtual_image`.
+**Margin work (2026-10-03, same data):** sub-pixel lateral drift + masking the
+non-finger background (both in `src/swipe.rs`) raise the leave-one-out best scores from
+40/57/57/40 to **44/97/95/45** (still 4 of 6 swipes); pairwise mean 21.7 -> 26.2
+(`scripts/pair_scores.py`), impostors <= 10. The two failing swipes fail on **finger
+placement** (one 3.7 mm off to the side, one started below the core), not on
+reconstruction. Rejected with numbers in NOTES: Gabor enhancement, other enlargement
+factors, fixed/constant lateral drift, global rescale, stall trimming.
+
+**NEXT ACTION:** in practice the margin now depends on swipe placement and on how
+varied the 5 enrolled swipes are. Options: (a) user re-runs `scripts/live_enroll.py`
+aiming the same finger area each time, to see the live verify pass; (b) explain swipe 6's
+~14% vertical stretch (skin stretch vs lag bias) — the remaining reconstruction
+question; (c) port HP's `IRfinalize*Estimates`; (d) a real libfprint driver (own
+threshold, retry-on-bad-swipe) instead of `virtual_image`; then the fprintd drop-in
+(system change — ask first).
 
 **Sensor access note:** the udev rule is installed (`user:bine:rw-`); it survives
 re-enumeration. If the sensor gets wedged, a full power-off (not just reboot) clears
@@ -237,7 +246,10 @@ show "too few lines" until session 5.
      the secondary is on skin, and it is an interior peak (L >= 4, NCC halfway to
      zero lag lower by >= 0.15 — rejects ridges parallel to the swipe / resting finger);
   4. hold the nearest accepted lag up to 1.5·L lines away, emit nothing beyond;
-  5. position y = Σ 8/L, x = Σ dx/L; interpolate the primary line at integer y.
+  5. lateral drift dx at sub-pixel precision (NCC vs shift -5..5 at the tracked lag,
+     parabola peak, median 31 + mean 61);
+  6. position y = Σ 8/L, x = Σ dx/L; interpolate the primary line at integer y;
+  7. non-finger background (reachable from the border) flattened to mid-grey.
   HP instead quantises the lag to 1..21 and inserts/deletes whole lines
   (`dutyCycleInsDelSep8` @0x542240, `retInsDelSep8` @0x542280); `vcsInitIR`
   requires separation/pitch == 8. Not ported: HP's further cull tests,

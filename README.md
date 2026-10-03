@@ -189,9 +189,9 @@ command stream, and that let the no-finger noise drift up into the finger range.
   `src/swipe.rs` measures finger speed from the sensor's second sensing line (8
   rows upstream of the imaging line) and resamples to square 50 µm pixels, so
   swipes of different speed come out at the same scale. Different swipes of one
-  finger do not yet reach libfprint's match threshold on the recorded test swipes
-  (best score 27 of 40; see `docs/STATUS.md` §0). `scripts/loo_match.py` runs
-  the offline match test.
+  finger match through libfprint only when they cover the same finger area
+  (4 of 6 live test swipes; see `docs/STATUS.md` §0). `scripts/loo_match.py` runs
+  the offline match test, `scripts/pair_scores.py` pairwise scores.
 - **Unowned sensors only.** Owned sensors need the pairing (`TakeOwnership`) flow
   — fully mapped in `NOTES.md` but not implemented, since it is a persistent,
   cycle-limited sensor write.

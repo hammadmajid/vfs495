@@ -288,7 +288,7 @@ pub fn decode_ep2(buf: &[u8], stride: usize, cfg: &DliConfig) -> Lines {
 // ---- reconstruction -------------------------------------------------------
 
 /// Separable box blur (radius `r`).
-fn box_blur(src: &[f32], rows: usize, cols: usize, r: usize) -> Vec<f32> {
+pub(crate) fn box_blur(src: &[f32], rows: usize, cols: usize, r: usize) -> Vec<f32> {
     let mut tmp = vec![0f32; src.len()];
     for y in 0..rows {
         for x in 0..cols {

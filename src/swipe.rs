@@ -22,7 +22,7 @@
 //! tables; here the lag is tracked at sub-line precision and rows are
 //! interpolated. See NOTES.md 2026-10-03 for the reverse engineering.
 
-use crate::image::{Lines, CONTACT_SD};
+use crate::image::{box_blur, Lines, CONTACT_SD};
 
 /// Primary (imaging) pixels per line.
 const PRI_W: usize = 200;
@@ -38,6 +38,11 @@ const CULL_D: f32 = 25.0;
 const LAG_MIN: usize = 2;
 const LAG_MAX: usize = 160;
 const DX_MAX: i32 = 3;
+/// Lateral range over which the drift is then measured to sub-pixel precision,
+/// and the smoothing of that measurement (median, then mean, in culled lines).
+const DX_REFINE: i32 = 5;
+const DX_MEDIAN: usize = 31;
+const DX_MEAN: usize = 61;
 const WIN: usize = 31;
 /// Lag tracking: max lag change per line and its per-step penalty.
 const TRACK_STEP: i32 = 3;
@@ -136,25 +141,23 @@ fn cull(lines: &Lines, a: usize, b: usize) -> Vec<usize> {
 }
 
 /// Windowed NCC of secondary(t) against primary(t ± L), best over the lateral
-/// shift. `c[t * NLAG + (L - LAG_MIN)]`, with the shift achieving it in `dx`.
+/// shift. `c[t * NLAG + (L - LAG_MIN)]`.
 struct Corr {
     c: Vec<f32>,
-    dx: Vec<i8>,
 }
 
 const NLAG: usize = LAG_MAX - LAG_MIN + 1;
 
 /// `sec[t]`: normalised secondary rows; `pri[d][t]`: normalised primary pixels
-/// under them at lateral shift `d - DX_MAX`. `forward`: secondary leads (the
+/// under them, one entry per lateral shift searched. `forward`: secondary leads (the
 /// skin reaches the primary `L` lines later).
 fn correlate(sec: &[Vec<f32>], pri: &[Vec<Vec<f32>>], forward: bool) -> Corr {
     let m = sec.len();
     let mut c = vec![-2f32; m * NLAG];
-    let mut dx = vec![0i8; m * NLAG];
     let half = WIN / 2;
     let mut d = vec![0f32; m];
     let mut cs = vec![0f32; m + 1];
-    for (di, p) in pri.iter().enumerate() {
+    for p in pri {
         for lag in LAG_MIN..=LAG_MAX.min(m.saturating_sub(1)) {
             for t in 0..m {
                 let other = if forward { t.checked_add(lag).filter(|&o| o < m) } else { t.checked_sub(lag) };
@@ -166,14 +169,11 @@ fn correlate(sec: &[Vec<f32>], pri: &[Vec<Vec<f32>>], forward: bool) -> Corr {
             for t in 0..m {
                 let w = (cs[(t + half + 1).min(m)] - cs[t.saturating_sub(half)]) / WIN as f32;
                 let i = t * NLAG + lag - LAG_MIN;
-                if w > c[i] {
-                    c[i] = w;
-                    dx[i] = (di as i32 - DX_MAX) as i8;
-                }
+                c[i] = c[i].max(w);
             }
         }
     }
-    Corr { c, dx }
+    Corr { c }
 }
 
 /// Sum over lines of the best NCC at any lag (which swipe direction fits).
@@ -243,6 +243,71 @@ fn median_filter(x: &[f32], k: usize) -> Vec<f32> {
         .collect()
 }
 
+fn mean_filter(x: &[f32], k: usize) -> Vec<f32> {
+    let h = (k / 2) as isize;
+    let n = x.len() as isize;
+    (0..n).map(|i| (i - h..=i + h).map(|j| x[j.clamp(0, n - 1) as usize]).sum::<f32>() / k as f32).collect()
+}
+
+/// Flatten everything that is not finger to mid-grey, so the matcher finds no
+/// minutiae in sensor noise or in the row streaks beside the finger. Finger =
+/// local contrast above `MASK_SD`, of which at least half must vary along the
+/// row (streaks do not).
+fn mask_background(px: &mut [u8], w: usize, h: usize) {
+    const MASK_SD: f32 = 18.0;
+    let im: Vec<f32> = px.iter().map(|&v| v as f32).collect();
+    let local = box_blur(&im, h, w, 7);
+    let mut along = vec![0f32; im.len()];
+    for y in 0..h {
+        let row = &im[y * w..(y + 1) * w];
+        for x in 0..w {
+            let (x0, x1) = (x.saturating_sub(4), (x + 5).min(w));
+            along[y * w + x] = row[x] - row[x0..x1].iter().sum::<f32>() / (x1 - x0) as f32;
+        }
+    }
+    let energy = |hp: Vec<f32>| -> Vec<f32> {
+        let sq: Vec<f32> = hp.iter().map(|v| v * v).collect();
+        box_blur(&sq, h, w, 7).iter().map(|v| v.sqrt()).collect()
+    };
+    let e = energy(im.iter().zip(&local).map(|(a, b)| a - b).collect());
+    let ex = energy(along);
+    let finger: Vec<f32> =
+        e.iter().zip(&ex).map(|(&a, &b)| if a > MASK_SD && b > MASK_SD * 0.5 { 1.0 } else { 0.0 }).collect();
+    // Background = non-finger pixels reachable from the image border; a
+    // low-contrast patch inside the finger stays as it is (a grey hole there
+    // would itself look like ridge endings).
+    let open: Vec<bool> = box_blur(&finger, h, w, 5).iter().map(|&f| f <= 0.5).collect();
+    let mut background = vec![false; px.len()];
+    let mut stack: Vec<usize> = (0..w)
+        .flat_map(|x| [x, (h - 1) * w + x])
+        .chain((0..h).flat_map(|y| [y * w, y * w + w - 1]))
+        .collect();
+    while let Some(i) = stack.pop() {
+        if !open[i] || background[i] {
+            continue;
+        }
+        background[i] = true;
+        let (x, y) = (i % w, i / w);
+        if x > 0 {
+            stack.push(i - 1);
+        }
+        if x + 1 < w {
+            stack.push(i + 1);
+        }
+        if y > 0 {
+            stack.push(i - w);
+        }
+        if y + 1 < h {
+            stack.push(i + w);
+        }
+    }
+    for (p, bg) in px.iter_mut().zip(background) {
+        if bg {
+            *p = 128;
+        }
+    }
+}
+
 /// Reconstruct one contact run `[a, b)` into rows of `PRI_W` background-removed
 /// pixels, one row per 50 µm of skin. `bg_pri` / `bg_sec`: whole-capture
 /// per-column medians (the sensor's fixed pattern).
@@ -266,7 +331,7 @@ fn reconstruct_run(lines: &Lines, a: usize, b: usize, bg_pri: &[f32], bg_sec: &[
             r
         })
         .collect();
-    let pri: Vec<Vec<Vec<f32>>> = (-DX_MAX..=DX_MAX)
+    let pri: Vec<Vec<Vec<f32>>> = (-DX_REFINE..=DX_REFINE)
         .map(|dx| {
             (0..m)
                 .map(|t| {
@@ -285,8 +350,9 @@ fn reconstruct_run(lines: &Lines, a: usize, b: usize, bg_pri: &[f32], bg_sec: &[
         .collect();
 
     // Swipe direction = whichever lag sign correlates better; then track the lag.
-    let fwd = correlate(&sec, &pri, true);
-    let rev = correlate(&sec, &pri, false);
+    let search = &pri[(DX_REFINE - DX_MAX) as usize..=(DX_REFINE + DX_MAX) as usize];
+    let fwd = correlate(&sec, search, true);
+    let rev = correlate(&sec, search, false);
     let forward = direction_score(&fwd) >= direction_score(&rev);
     let corr = if forward { fwd } else { rev };
     let path = track(&corr, m);
@@ -295,7 +361,6 @@ fn reconstruct_run(lines: &Lines, a: usize, b: usize, bg_pri: &[f32], bg_sec: &[
     // Which lines carry a trustworthy lag measurement.
     let mut good_idx = Vec::new();
     let mut good_lag = Vec::new();
-    let mut good_dx = Vec::new();
     for (t, &i) in path.iter().enumerate() {
         let lag = i + LAG_MIN;
         let q = c(t, i);
@@ -316,7 +381,6 @@ fn reconstruct_run(lines: &Lines, a: usize, b: usize, bg_pri: &[f32], bg_sec: &[
             }
             good_idx.push(t);
             good_lag.push(lf);
-            good_dx.push(corr.dx[t * NLAG + i] as f32);
         }
     }
     if std::env::var("VFS_SWIPE_DEBUG").is_ok() {
@@ -327,7 +391,36 @@ fn reconstruct_run(lines: &Lines, a: usize, b: usize, bg_pri: &[f32], bg_sec: &[
         return None;
     }
     let lag = median_filter(&interp_at_indices(m, &good_idx, &good_lag), 5);
-    let dx = median_filter(&interp_at_indices(m, &good_idx, &good_dx), 15);
+
+    // Lateral drift, to sub-pixel precision: at each line's lag, the windowed NCC
+    // as a function of the lateral shift, parabola-refined at its peak. An
+    // integer shift is far too coarse — one pixel over a typical lag is a shear
+    // of ~0.12 px per row.
+    let half = WIN / 2;
+    let mut ncc_by_dx = vec![vec![0f32; m]; pri.len()];
+    for (p, out) in pri.iter().zip(ncc_by_dx.iter_mut()) {
+        let mut cs = vec![0f32; m + 1];
+        for t in 0..m {
+            let l = lag[t].round() as usize;
+            let other = if forward { (t + l).min(m - 1) } else { t.saturating_sub(l) };
+            cs[t + 1] = cs[t] + sec[t].iter().zip(&p[other]).map(|(a, b)| a * b).sum::<f32>();
+        }
+        for (t, o) in out.iter_mut().enumerate() {
+            *o = (cs[(t + half + 1).min(m)] - cs[t.saturating_sub(half)]) / WIN as f32;
+        }
+    }
+    let good_dx: Vec<f32> = good_idx
+        .iter()
+        .map(|&t| {
+            let q = |d: usize| ncc_by_dx[d][t];
+            let peak = (0..pri.len()).max_by(|&a, &b| q(a).partial_cmp(&q(b)).unwrap()).unwrap();
+            let d = peak.clamp(1, pri.len() - 2);
+            let den = q(d - 1) - 2.0 * q(d) + q(d + 1);
+            let frac = if den < 0.0 { (0.5 * (q(d - 1) - q(d + 1)) / den).clamp(-0.5, 0.5) } else { 0.0 };
+            d as f32 - DX_REFINE as f32 + frac
+        })
+        .collect();
+    let dx = mean_filter(&median_filter(&interp_at_indices(m, &good_idx, &good_dx), DX_MEDIAN), DX_MEAN);
 
     // Skin position (rows) and lateral offset (pixels) of every kept line.
     let mut y = vec![0f32; m];
@@ -400,10 +493,11 @@ pub fn reconstruct_swipe(lines: &Lines) -> Option<(Vec<u8>, usize, usize)> {
     all.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let (lo, hi) = (all[all.len() / 100], all[all.len() * 99 / 100]);
     let span = (hi - lo).max(1e-3);
-    let px = best
+    let mut px: Vec<u8> = best
         .iter()
         .flat_map(|r| r.iter().map(|&v| ((v - lo) / span * 255.0).clamp(0.0, 255.0) as u8))
         .collect();
+    mask_background(&mut px, PRI_W, best.len());
     Some((px, PRI_W, best.len()))
 }
 

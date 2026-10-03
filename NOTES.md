@@ -1631,3 +1631,42 @@ finger now match through libfprint, which the old reconstruction never did (0/6)
 margin is thin (two matches at exactly 40) and a poor swipe still fails.
 Observed: swipes 3-5 show a slanted finger outline; not yet known whether that is real
 lateral drift or a bias in the secondary→primary column offset (c-131).
+
+### 2026-10-03 — widening the margin: sub-pixel lateral drift + background mask (measured), and what did not help
+Metric: `scripts/pair_scores.py` — every live2 swipe enrolled alone, the other five verified
+against it (30 genuine pairs), mirrored prints as impostors. Baseline (session-11 build):
+mean 21.7, 4 pairs >= 40, impostor max 9.
+
+**Adopted (Rust, `src/swipe.rs`): mean 26.2, 6 pairs >= 40, impostor max 10; pair 3-4 57 -> 95.**
+Leave-one-out (5-print enroll): still 4 of 6 held-out swipes match, but best scores
+40/57/57/40 -> 44/97/95/45.
+- *Sub-pixel lateral drift.* The drift was the integer shift (-3..3) that maximised the NCC.
+  One pixel over a typical lag is a shear of ~0.12 px/row — the size of the shear mismatch
+  measured between swipe pairs. Now: NCC vs shift (-5..5) at each line's lag, parabola peak,
+  median 31 + mean 61 smoothing.
+- *Background mask.* Non-finger area (local contrast < 18, or contrast not varying along the
+  row = row streaks) reachable from the image border is set to mid-grey. libfprint detects
+  ~35-45 minutiae per image and many sat in the streaks/noise beside the finger.
+
+**The lateral correction is real, not an artefact** (I suspected it because swipes 3-5 come
+out slanted): without it same-finger pairs disagree in shear by ~0.15-0.26 px/row and the
+band-matching consistency drops (ok bands 84% -> 62%); with it shear mismatch is ~0.03.
+Measured drift per swipe: -1.9, -1.8, -0.9, -0.1 px per 8 rows — the user swipes at
+different angles. So the slant is the true swipe path.
+
+**Tried and rejected (same metric):**
+- Lag search with the lateral shift fixed at 0: mean 17.6, vertical scale mismatch 3% -> 13%.
+- One constant drift per swipe (straight-line model), lag search constrained to it: mean 19.3.
+- Gabor ridge enhancement (16 orientations, period 8.5): mean 15.4 — cleaner to the eye,
+  worse for the matcher.
+- Feed enlargement 1.0 / 1.25 / 1.5 / 1.75 / 2.0 / 2.5: means 23.9 / 22.5 / 23.0 / 17.3 /
+  13.0 / 12.5 — flat up to 1.5, worse beyond. 1.5 kept.
+- Oracle per-swipe vertical rescale (swipe 6 x0.86, swipe 1 x0.955): mean 24.2 vs 27.2 — a
+  global scale fix is not the lever; residual distortion is local (band residuals ~3 px).
+- Trimming swipe 2 at its stall: no gain (scores stay <= 10).
+
+**Why swipes 2 and 6 still fail: finger placement, not reconstruction.** Swipe 2 sits ~75 px
+(3.7 mm) to the side of the others and swipe 6 starts below the loop core, so each shares
+little area with the rest. Swipe 6 is also ~14% taller than swipes 4/5 over the shared area
+(cause unknown: skin stretch or a lag bias). Matcher sensitivity for reference: an image
+against its own 5% / 10% / 15% vertically rescaled copy scores 99 / 69 / 35 (identical: ~250).
